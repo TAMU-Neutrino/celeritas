@@ -6,6 +6,7 @@
 //---------------------------------------------------------------------------//
 #pragma once
 
+#include "corecel/math/Algorithms.hh"
 #include "celeritas/Constants.hh"
 #include "celeritas/Quantities.hh"
 #include "celeritas/optical/MaterialView.hh"
@@ -64,9 +65,14 @@ CELER_FUNCTION real_type GroupVelocityCalculator::operator()(Energy energy) cons
     real_type r_index = r_index_calc_(value_as<Energy>(energy));
     real_type r_index_deriv = r_index_deriv_calc_(value_as<Energy>(energy));
 
-    real_type group_vel
-        = constants::c_light
-          / (r_index + value_as<Energy>(energy) * r_index_deriv);
+    // Group index n_g = n + E dn/dE. In anomalous-dispersion regions
+    // (decreasing refractive index) the classical group velocity concept
+    // breaks down and the naive expression can exceed the speed of light or
+    // change sign: clamp the group index to unity.
+    real_type group_index = celeritas::max(
+        r_index + value_as<Energy>(energy) * r_index_deriv, real_type(1));
+
+    real_type group_vel = constants::c_light / group_index;
 
     CELER_ENSURE(group_vel > 0);
     CELER_ENSURE(group_vel <= constants::c_light);
