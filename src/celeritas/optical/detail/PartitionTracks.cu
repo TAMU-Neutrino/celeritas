@@ -26,7 +26,7 @@ namespace
 //---------------------------------------------------------------------------//
 struct IsNotInactive
 {
-    ObserverPtr<TrackStatus const> status_;
+    ObserverPtr<TrackStatus const, MemSpace::device> status_;
 
     CELER_FUNCTION bool operator()(TrackSlotId::size_type slot) const
     {
@@ -43,18 +43,19 @@ struct IsNotInactive
  */
 size_type partition_alive(DeviceRef<CoreStateData> const& state)
 {
-    auto slots = state.track_slots[
-        AllItems<TrackSlotId::size_type, MemSpace::device>{}];
-    auto start = device_pointer_cast(slots.data());
+    using SlotT = TrackSlotId::size_type;
+    auto slots
+        = state.track_slots[AllItems<SlotT, MemSpace::device>{}];
+    auto status = state.sim.status[AllItems<TrackStatus, MemSpace::device>{}];
 
-    auto* last = thrust::partition(
+    auto start = device_pointer_cast(
+        ObserverPtr<SlotT, MemSpace::device>{slots.data()});
+    auto last = thrust::partition(
         thrust_execute_on(state.stream_id),
         start,
         start + slots.size(),
-        IsNotInactive{
-            ObserverPtr<TrackStatus const>{
-                state.sim.status[AllItems<TrackStatus, MemSpace::device>{}]
-                    .data()}});
+        IsNotInactive{ObserverPtr<TrackStatus const, MemSpace::device>{
+            status.data()}});
     CELER_DEVICE_API_CALL(PeekAtLastError());
 
     return static_cast<size_type>(last - start);
