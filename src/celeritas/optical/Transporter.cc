@@ -82,6 +82,8 @@ void Transporter::transport_impl(CoreState<M>& state) const
     // to be statistical rather than a missed track: with it off the loop
     // launches over every slot, exactly as before.
     static bool const compact = std::getenv("CELER_TRACK_COMPACT") != nullptr;
+    static bool const trace_occupancy
+        = std::getenv("CELER_DEBUG_OCCUPANCY") != nullptr;
     static size_type const full_partition_period = [] {
         if (char const* s = std::getenv("CELER_TRACK_COMPACT_PERIOD"))
         {
@@ -142,6 +144,20 @@ void Transporter::transport_impl(CoreState<M>& state) const
         // updated values
         counters = state.sync_get_counters();
         num_steps += counters.num_active;
+
+        if (CELER_UNLIKELY(trace_occupancy && num_step_iters < 40))
+        {
+            // Per-iteration view of why the slots are empty: if pending
+            // photons are waiting while vacancies go unused, the loop is
+            // generator-starved rather than tail-limited.
+            CELER_LOG_LOCAL(warning)
+                << "[OCC] iter " << num_step_iters
+                << " active " << counters.num_active
+                << " alive " << counters.num_alive
+                << " vacancies " << counters.num_vacancies
+                << " initializers " << counters.num_initializers
+                << " pending " << counters.num_pending;
+        }
 
         // Record the step time
         if (input_.step_times)
