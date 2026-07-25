@@ -131,6 +131,18 @@ CELER_FUNCTION void PostBoundaryExecutor::operator()(CoreTrackView& track) const
             Real3 pos = geo.pos();
             axpy(clearance, dir, &pos);
             geo = GeoTrackInitializer{pos, dir, {}};
+#if !CELER_DEVICE_COMPILE
+            // Where the relocation actually landed, keyed by the volume the
+            // photon was stuck in: "from" in the key, "to" in the volume
+            // field. If it reads back the same volume the relocation is not
+            // clearing the face either.
+            char lb[48];
+            std::snprintf(lb, sizeof(lb), "reloc-from-%u", dbg_before);
+            celeritas::optical::detail::tally_optical_kill(
+                lb,
+                geo.is_outside() ? 0u : geo.volume_id().unchecked_get(),
+                track.particle().energy().value() > 4.576e-6);
+#endif
         }
 #if !CELER_DEVICE_COMPILE
         if (int const want = celeritas::optical::detail::traced_primary();
