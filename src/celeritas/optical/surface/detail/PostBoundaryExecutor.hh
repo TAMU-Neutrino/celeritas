@@ -160,7 +160,8 @@ CELER_FUNCTION void PostBoundaryExecutor::operator()(CoreTrackView& track) const
                 = dot_product(dir, normal) < 0 ? real_type{-1} : real_type{1};
             Real3 const origin = geo.pos();
             real_type step = 1e-7;
-            for (int attempt = 0; attempt < 3; ++attempt, step *= 10)
+            int attempt = 0;
+            for (; attempt < 4; ++attempt, step *= 10)
             {
                 Real3 pos = origin;
                 axpy(side * step, normal, &pos);
@@ -171,6 +172,16 @@ CELER_FUNCTION void PostBoundaryExecutor::operator()(CoreTrackView& track) const
                     break;
                 }
             }
+#if !CELER_DEVICE_COMPILE
+            // How far the escalation had to go. If most crossings need the
+            // largest step then the displacement is no longer negligible
+            // against the micron coatings and the approach is wrong.
+            char db[32];
+            std::snprintf(db, sizeof(db), "reloc-attempt-%d", attempt);
+            celeritas::optical::detail::tally_optical_kill(
+                db, dbg_before,
+                track.particle().energy().value() > 4.576e-6);
+#endif
 #if !CELER_DEVICE_COMPILE
             // Where the relocation actually landed, keyed by the volume the
             // photon was stuck in: "from" in the key, "to" in the volume
