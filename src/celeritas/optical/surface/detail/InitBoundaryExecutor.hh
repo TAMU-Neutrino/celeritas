@@ -65,11 +65,10 @@ CELER_FUNCTION void InitBoundaryExecutor::operator()(CoreTrackView& track) const
     VolumeSurfaceSelector select_surface{track.surface(),
                                          geo.volume_instance_id()};
     OptMatId pre_volume_material = track.material_record().material_id();
-    VolumeInstanceId const pre_volume_inst = geo.volume_instance_id();
 #if !CELER_DEVICE_COMPILE
     // Pre-crossing volume, for the boundary-selection tally below
     unsigned int const dbg_pre_vol = geo.volume_id().unchecked_get();
-    unsigned int const dbg_pre_vi = pre_volume_inst.unchecked_get();
+    unsigned int const dbg_pre_vi = geo.volume_instance_id().unchecked_get();
 #endif
 
     // Move the particle across the boundary
@@ -183,29 +182,6 @@ CELER_FUNCTION void InitBoundaryExecutor::operator()(CoreTrackView& track) const
         init.post_volume_material = post_volume_material;
         return init;
     }();
-
-    if (pre_volume_inst && geo.volume_instance_id() == pre_volume_inst)
-    {
-        // Boundary internal to a single volume instance: solids converted
-        // for VecGeom/ORANGE (boolean and multi-union constituents) expose
-        // their internal faces to the navigator, but a volume has no
-        // optical interface with itself and Geant4 never presents such a
-        // crossing. Pass the photon straight through, exactly as a
-        // `transmit` reflectivity result would, without running any
-        // surface physics: re-applying this volume's own boundary surface
-        // re-rolls its reflectivity at every internal face, which drives
-        // an absorbing surface to 100%. (Merely leaving the surface unset
-        // is NOT sufficient: the default surface still returns `interact`,
-        // so the photon keeps meeting the face and bounces until the step
-        // limit kills it.)
-        auto traverse = surface_physics.traversal();
-        traverse.cross_interface(traverse.dir());
-        track.sim().post_step_action(
-            traverse.is_exiting()
-                ? surface_physics.scalars().post_boundary_action
-                : surface_physics.scalars().surface_stepping_action);
-        return;
-    }
 
     CELER_ASSERT(
         is_entering_surface(geo.dir(), surface_physics.global_normal()));
