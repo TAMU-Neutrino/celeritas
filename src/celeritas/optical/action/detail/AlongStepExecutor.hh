@@ -9,6 +9,7 @@
 #include "corecel/Assert.hh"
 #include "corecel/Macros.hh"
 #include "celeritas/Types.hh"
+#include "celeritas/geo/CoreGeoTrackView.hh"
 #include "celeritas/optical/CoreTrackView.hh"
 #include "celeritas/optical/SimTrackView.hh"
 #include "celeritas/optical/detail/GroupVelocityCalculator.hh"
@@ -67,7 +68,8 @@ CELER_FUNCTION void AlongStepExecutor::operator()(CoreTrackView& track)
                       "pathmat mat=%u e=%d",
                       track.material_record().material_id().unchecked_get(),
                       decade < -12 ? -12 : (decade > 2 ? 2 : decade));
-        celeritas::optical::detail::tally_optical_kill(buf, 0, false);
+        celeritas::optical::detail::tally_optical_kill(
+            buf, track.geometry().volume_id().unchecked_get(), false);
     }
 #endif
 
