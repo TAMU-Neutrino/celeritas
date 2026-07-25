@@ -11,6 +11,7 @@
 #include "corecel/math/ArrayUtils.hh"
 #include "celeritas/geo/CoreGeoTrackView.hh"
 #include "celeritas/optical/CoreTrackView.hh"
+#include "celeritas/optical/SimTrackView.hh"
 #include <cstdio>
 #include "celeritas/optical/detail/OpticalKillTally.hh"
 
@@ -71,7 +72,36 @@ CELER_FUNCTION void PostBoundaryExecutor::operator()(CoreTrackView& track) const
     {
         // Re-entrant into the pre-volume
         auto geo = track.geometry();
+#if !CELER_DEVICE_COMPILE
+        unsigned int const dbg_before = geo.volume_id().unchecked_get();
+#endif
         geo.cross_boundary();
+#if !CELER_DEVICE_COMPILE
+        if (int const want = celeritas::optical::detail::traced_primary();
+            want != -1 && track.sim().primary_id())
+        {
+            unsigned int const prim
+                = track.sim().primary_id().unchecked_get();
+            if (want > 0 ? prim == static_cast<unsigned int>(want)
+                         : prim % static_cast<unsigned int>(-want) == 0)
+            {
+                // Where a reflected photon is put back. If the two drivers
+                // disagree here, every later crossing is on the wrong side.
+                char rbuf[160];
+                std::snprintf(rbuf,
+                              sizeof(rbuf),
+                              "REENTER prim=%u step=%u %u -> %u "
+                              "xyz=(%.6f,%.6f,%.6f)",
+                              prim,
+                              static_cast<unsigned int>(
+                                  track.sim().num_steps()),
+                              dbg_before,
+                              geo.volume_id().unchecked_get(),
+                              geo.pos()[0], geo.pos()[1], geo.pos()[2]);
+                celeritas::optical::detail::trace_surface(rbuf);
+            }
+        }
+#endif
         if (CELER_UNLIKELY(geo.failed()))
         {
             track.apply_errored();
