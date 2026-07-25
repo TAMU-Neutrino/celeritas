@@ -17,6 +17,7 @@
 #include "celeritas/optical/surface/VolumeSurfaceSelector.hh"
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include "celeritas/optical/detail/OpticalKillTally.hh"
 
 namespace celeritas
@@ -100,10 +101,19 @@ CELER_FUNCTION void InitBoundaryExecutor::operator()(CoreTrackView& track) const
         // navigator otherwise keeps returning it and the photon never
         // advances. The nudge is far below any physically relevant length
         // and far above the geometry tolerance.
+#if !CELER_DEVICE_COMPILE
+        static bool const no_nudge
+            = std::getenv("CELER_NO_INTERNAL_NUDGE") != nullptr;
+#else
+        constexpr bool no_nudge = false;
+#endif
         constexpr real_type nudge = 1e-7;
-        Real3 pos = geo.pos();
-        axpy(nudge, geo.dir(), &pos);
-        geo.move_internal(pos);
+        if (!no_nudge)
+        {
+            Real3 pos = geo.pos();
+            axpy(nudge, geo.dir(), &pos);
+            geo.move_internal(pos);
+        }
 #if !CELER_DEVICE_COMPILE
         celeritas::optical::detail::tally_optical_kill(
             "internal-face-skipped",

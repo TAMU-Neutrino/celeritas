@@ -13,6 +13,7 @@
 #include "celeritas/optical/CoreTrackView.hh"
 #include "celeritas/optical/SimTrackView.hh"
 #include <cstdio>
+#include <cstdlib>
 #include "celeritas/optical/detail/OpticalKillTally.hh"
 
 namespace celeritas
@@ -78,7 +79,18 @@ CELER_FUNCTION void PostBoundaryExecutor::operator()(CoreTrackView& track) const
 #endif
         geo.cross_boundary();
 
-        if (before_inst && !geo.failed() && !geo.is_outside()
+#if !CELER_DEVICE_COMPILE
+        // Diagnostic gates: both of this file's displacements move a track
+        // along its direction, which is only safe if that direction really
+        // points out of the volume it is leaving. Turning each off separately
+        // is how to tell which one is putting photons somewhere they should
+        // not be. Host only, so CPU runs are the ones to diagnose with.
+        static bool const no_reloc
+            = std::getenv("CELER_NO_REENTRY_RELOC") != nullptr;
+#else
+        constexpr bool no_reloc = false;
+#endif
+        if (!no_reloc && before_inst && !geo.failed() && !geo.is_outside()
             && geo.volume_instance_id() == before_inst)
         {
             // The reflected photon was NOT returned to the volume it came
@@ -151,7 +163,13 @@ CELER_FUNCTION void PostBoundaryExecutor::operator()(CoreTrackView& track) const
     // re-entrant path above still crosses from the true surface position,
     // and only a track that is leaving gets displaced. The distance is far
     // below any physically relevant length and far above the tolerance.
-    if (track.sim().status() == TrackStatus::alive)
+#if !CELER_DEVICE_COMPILE
+    static bool const no_clearance
+        = std::getenv("CELER_NO_CLEARANCE") != nullptr;
+#else
+    constexpr bool no_clearance = false;
+#endif
+    if (!no_clearance && track.sim().status() == TrackStatus::alive)
     {
         constexpr real_type clearance = 1e-7;
         auto geo = track.geometry();
