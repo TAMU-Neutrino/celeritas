@@ -90,6 +90,32 @@ CELER_FUNCTION void PostBoundaryExecutor::operator()(CoreTrackView& track) const
 #else
         constexpr bool no_reloc = false;
 #endif
+#if !CELER_DEVICE_COMPILE
+        if (before_inst && !geo.failed() && !geo.is_outside())
+        {
+            // Did the reflected photon actually get back to the volume it
+            // came from? Keyed by volume so the failure can be attributed:
+            // a volume whose reflections all fail is one whose photons end
+            // up inside it and are absorbed there.
+            bool const same = geo.volume_instance_id() == before_inst;
+            bool const uv = track.particle().energy().value() > 4.576e-6;
+            celeritas::optical::detail::tally_optical_kill(
+                same ? "reentry-failed" : "reentry-ok", dbg_before, uv);
+
+            // Which way the reflected photon was sent relative to the
+            // surface normal. If a volume's reflections all leave along the
+            // inward side, the hemisphere is being chosen against the wrong
+            // orientation and the navigator cannot rescue it.
+            char nb[48];
+            std::snprintf(nb, sizeof(nb), "reentry-dot-%s",
+                          dot_product(geo.dir(),
+                                      track.surface_physics().global_normal())
+                                  < 0
+                              ? "neg"
+                              : "pos");
+            celeritas::optical::detail::tally_optical_kill(nb, dbg_before, uv);
+        }
+#endif
         if (!no_reloc && before_inst && !geo.failed() && !geo.is_outside()
             && geo.volume_instance_id() == before_inst)
         {
