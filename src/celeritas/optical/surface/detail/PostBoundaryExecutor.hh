@@ -159,9 +159,8 @@ CELER_FUNCTION void PostBoundaryExecutor::operator()(CoreTrackView& track) const
             real_type const side
                 = dot_product(dir, normal) < 0 ? real_type{-1} : real_type{1};
             Real3 const origin = geo.pos();
-            for (real_type step : {real_type{1e-7},
-                                   real_type{1e-6},
-                                   real_type{1e-5}})
+            real_type step = 1e-7;
+            for (int attempt = 0; attempt < 3; ++attempt, step *= 10)
             {
                 Real3 pos = origin;
                 axpy(side * step, normal, &pos);
