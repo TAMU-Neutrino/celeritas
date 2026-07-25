@@ -6,6 +6,8 @@
 //---------------------------------------------------------------------------//
 #include "Transporter.hh"
 
+#include <cstdlib>
+
 #include <utility>
 
 #include "corecel/io/Logger.hh"
@@ -146,6 +148,20 @@ void Transporter::transport_impl(CoreState<M>& state) const
     state.accum().steps += num_steps;
     state.accum().step_iters += num_step_iters;
     ++state.accum().flushes;
+
+    if (std::getenv("CELER_DEBUG_OCCUPANCY"))
+    {
+        // Every optical action launches one thread per track SLOT, so the
+        // fraction of slots holding a live track is the ceiling on what
+        // launching over live tracks instead could recover.
+        double const slots = static_cast<double>(state.size());
+        double const iters = static_cast<double>(num_step_iters);
+        CELER_LOG_LOCAL(warning)
+            << "[OCCUPANCY] flush: " << num_step_iters << " step iterations, "
+            << num_steps << " track-steps, " << state.size() << " slots, "
+            << "mean occupancy "
+            << (iters > 0 ? 100 * num_steps / (iters * slots) : 0.0) << "%";
+    }
 
     // Accumulate cut/error counters from the last synchronized counters
     state.accum().num_cut += counters.num_cut;
