@@ -9,6 +9,7 @@
 #include "corecel/Assert.hh"
 #include "corecel/Macros.hh"
 #include "corecel/math/ArrayOperators.hh"
+#include "corecel/math/ArrayUtils.hh"
 #include "celeritas/geo/CoreGeoTrackView.hh"
 #include "celeritas/optical/CoreTrackView.hh"
 #include "celeritas/optical/SimTrackView.hh"
@@ -62,8 +63,8 @@ CELER_FUNCTION void InitBoundaryExecutor::operator()(CoreTrackView& track) const
 
     // Surface selector must be created before crossing boundary to store
     // pre-volume information
-    VolumeSurfaceSelector select_surface{track.surface(),
-                                         geo.volume_instance_id()};
+    VolumeInstanceId const pre_volume_inst = geo.volume_instance_id();
+    VolumeSurfaceSelector select_surface{track.surface(), pre_volume_inst};
     OptMatId pre_volume_material = track.material_record().material_id();
 #if !CELER_DEVICE_COMPILE
     // Pre-crossing volume, for the boundary-selection tally below
@@ -88,6 +89,31 @@ CELER_FUNCTION void InitBoundaryExecutor::operator()(CoreTrackView& track) const
         track.sim().status(TrackStatus::killed);
         return;
     }
+    if (pre_volume_inst && geo.volume_instance_id() == pre_volume_inst)
+    {
+        // The crossing landed back in the volume instance it started in.
+        // Some navigators (VecGeom, for the constituent faces of a converted
+        // boolean solid) report those internal faces as volume boundaries.
+        // A volume has no optical interface with itself, so no surface
+        // physics applies; the track is nudged off the face because the
+        // navigator otherwise keeps returning it and the photon never
+        // advances. The nudge is far below any physically relevant length
+        // and far above the geometry tolerance.
+        constexpr real_type nudge = 1e-7;
+        Real3 pos = geo.pos();
+        axpy(nudge, geo.dir(), &pos);
+        geo.move_internal(pos);
+#if !CELER_DEVICE_COMPILE
+        celeritas::optical::detail::tally_optical_kill(
+            "internal-face-skipped",
+            geo.volume_id().unchecked_get(),
+            track.particle().energy().value() > 4.576e-6);
+#endif
+        // The step limit and post-step action are recomputed by the next
+        // pre-step, as for any track that ends a step inside a volume
+        return;
+    }
+
     OptMatId post_volume_material = track.material_record().material_id();
 #if !CELER_DEVICE_COMPILE
     {
