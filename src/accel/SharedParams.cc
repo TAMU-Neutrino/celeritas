@@ -6,9 +6,13 @@
 //---------------------------------------------------------------------------//
 #include "SharedParams.hh"
 
+#include <algorithm>
 #include <fstream>
+#include <map>
 #include <memory>
 #include <mutex>
+#include <random>
+#include <string>
 #include <utility>
 #include <vector>
 #include <CLHEP/Random/Random.h>
@@ -22,6 +26,7 @@
 #include <G4Positron.hh>
 #include <G4RunManager.hh>
 #include <G4Threading.hh>
+#include <G4VPhysicalVolume.hh>
 #include <G4VisExtent.hh>
 
 #include "corecel/Assert.hh"
@@ -37,6 +42,7 @@
 #include "celeritas/Types.hh"
 #include "celeritas/em/params/WentzelOKVIParams.hh"
 #include "celeritas/ext/GeantSd.hh"
+#include "celeritas/geo/CoreGeoParams.hh"
 #include "celeritas/global/CoreParams.hh"
 #include "celeritas/inp/FrameworkInput.hh"  // IWYU pragma: keep
 #include "celeritas/optical/CoreParams.hh"
@@ -61,6 +67,82 @@ namespace celeritas
 {
 namespace
 {
+//---------------------------------------------------------------------------//
+/*!
+ * Compare where two geometries put the same global point.
+ *
+ * The g4vg containment sampler checks each converted SOLID against its Geant4
+ * original in that solid's own frame, so it cannot see a wrong PLACEMENT: a
+ * correctly shaped volume in the wrong position or orientation passes it
+ * every time. This asks each geometry which volume instance owns a sampled
+ * global point instead, which tests the shape, the placement transform and
+ * the daughter hierarchy together. Volume instance IDs are canonical across
+ * geometry drivers, so the two answers are directly comparable, and the
+ * Geant4 geometry can name both of them.
+ *
+ * \c CELER_DEBUG_GEO_COMPARE is the number of points to sample;
+ * \c CELER_DEBUG_GEO_BOX is the half-width in cm of the cube they are drawn
+ * from, centred on the origin (the world is far larger than the detector, so
+ * sampling all of it would land almost every point in the world volume).
+ */
+void compare_geo_placement(GeantGeoParams const& ref,
+                           GeoParamsInterface const& test,
+                           size_type num_samples,
+                           real_type half_width)
+{
+    auto name_of = [&ref](VolumeInstanceId id) -> std::string {
+        if (!id)
+        {
+            return "<none>";
+        }
+        auto const* pv = ref.id_to_geant(id);
+        return pv ? std::string(pv->GetName()) + " ("
+                        + std::to_string(id.unchecked_get()) + ")"
+                  : std::to_string(id.unchecked_get());
+    };
+
+    std::mt19937 rng(12345);
+    std::uniform_real_distribution<real_type> sample(-half_width, half_width);
+
+    std::map<std::pair<int, int>, size_type> disagreements;
+    size_type num_disagree{0};
+    for (size_type i = 0; i < num_samples; ++i)
+    {
+        Real3 point{sample(rng), sample(rng), sample(rng)};
+        auto ref_id = ref.find_volume_instance_at(point);
+        auto test_id = test.find_volume_instance_at(point);
+        if (ref_id != test_id)
+        {
+            ++num_disagree;
+            auto as_int = [](VolumeInstanceId id) {
+                return id ? static_cast<int>(id.unchecked_get()) : -1;
+            };
+            ++disagreements[{as_int(ref_id), as_int(test_id)}];
+        }
+    }
+
+    CELER_LOG(info) << "[GEO-COMPARE] " << num_disagree << " of "
+                    << num_samples << " sampled points ("
+                    << (100.0 * num_disagree / num_samples)
+                    << "%) are in different volumes under the two geometries";
+
+    std::vector<std::pair<std::pair<int, int>, size_type>> sorted(
+        disagreements.begin(), disagreements.end());
+    std::sort(sorted.begin(), sorted.end(), [](auto const& a, auto const& b) {
+        return a.second > b.second;
+    });
+    for (auto const& [pair, count] : sorted)
+    {
+        CELER_LOG(info)
+            << "[GEO-COMPARE] " << count << "  geant4: "
+            << name_of(pair.first >= 0 ? VolumeInstanceId(pair.first)
+                                       : VolumeInstanceId{})
+            << "  ->  converted: "
+            << name_of(pair.second >= 0 ? VolumeInstanceId(pair.second)
+                                        : VolumeInstanceId{});
+    }
+}
+
 //---------------------------------------------------------------------------//
 void verify_offload(std::vector<G4ParticleDefinition*> const& offload,
                     ParticleParams const& particles,
@@ -331,6 +413,30 @@ SharedParams::SharedParams(SetupOptions const& options)
                    },
                },
                loaded_.problem);
+
+    if (std::string const num_str = celeritas::getenv("CELER_DEBUG_GEO_COMPARE");
+        !num_str.empty())
+    {
+        // Diagnostic: does the converted geometry put points in the same
+        // volumes as the Geant4 one? Only meaningful when the core geometry
+        // is a conversion of the Geant4 world rather than the world itself.
+        auto core_geo = std::visit(
+            Overload{[](setup::ProblemLoaded const& p)
+                         -> std::shared_ptr<CoreGeoParams const> {
+                         return p.core_params->geometry();
+                     },
+                     [](setup::OpticalProblemLoaded const& p)
+                         -> std::shared_ptr<CoreGeoParams const> {
+                         return p.transporter->params()->geometry();
+                     }},
+            loaded_.problem);
+        std::string const box_str = celeritas::getenv("CELER_DEBUG_GEO_BOX");
+        compare_geo_placement(*loaded_.geo,
+                              *core_geo,
+                              static_cast<size_type>(std::stoul(num_str)),
+                              box_str.empty() ? real_type{120}
+                                              : std::stod(box_str));
+    }
 
     // Add timing output
     timer_ = std::make_shared<TimeOutput>(this->num_streams());
