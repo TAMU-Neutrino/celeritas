@@ -8,6 +8,8 @@
 
 #include "corecel/Assert.hh"
 #include "corecel/Macros.hh"
+#include "corecel/math/ArrayUtils.hh"
+#include "celeritas/geo/CoreGeoTrackView.hh"
 #include "celeritas/optical/CoreTrackView.hh"
 #include <cstdio>
 #include "celeritas/optical/detail/OpticalKillTally.hh"
@@ -90,6 +92,24 @@ CELER_FUNCTION void PostBoundaryExecutor::operator()(CoreTrackView& track) const
             track.particle().energy().value() > 4.576e-6);
 #endif
         track.sim().status(TrackStatus::killed);
+    }
+
+    // Move clear of the face just crossed. When a track starts a step on a
+    // boundary the navigator advances its evaluation point by a fixed push
+    // and can re-detect that same face, which shows up as a spurious step
+    // of push length: ~11k of them per 2 events in CCM's bulk argon, on top
+    // of an otherwise correct step-length distribution. Doing this here,
+    // after all surface physics has finished, is what makes it safe -- the
+    // re-entrant path above still crosses from the true surface position,
+    // and only a track that is leaving gets displaced. The distance is far
+    // below any physically relevant length and far above the tolerance.
+    if (track.sim().status() == TrackStatus::alive)
+    {
+        constexpr real_type clearance = 1e-7;
+        auto geo = track.geometry();
+        Real3 pos = geo.pos();
+        axpy(clearance, geo.dir(), &pos);
+        geo.move_internal(pos);
     }
 
     CELER_ENSURE(!track.surface_physics().is_crossing_boundary());
