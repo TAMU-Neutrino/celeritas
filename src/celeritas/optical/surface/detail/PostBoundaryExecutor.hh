@@ -145,15 +145,20 @@ CELER_FUNCTION void PostBoundaryExecutor::operator()(CoreTrackView& track) const
             // the same volume -- measured, that is exactly what happens for
             // the boolean-solid reflectors. The normal is the one direction
             // whose perpendicular clearance is the full step regardless of
-            // incidence. Sign it to the side the photon is travelling.
-            // Escalate the displacement until the volume actually changes.
-            // A single fixed step cannot work for every face: how deep the
-            // navigator's own push left the track depends on the incidence,
-            // and a boolean solid can report a face that is not where the
-            // normal says it is. The ceiling is 1e-5 cm, a hundredth of the
-            // thinnest real layer in this detector (the micron TPB coatings),
-            // so a displacement that helps is always physically negligible
-            // and one that would not be is never taken.
+            // incidence.
+            //
+            // BOTH sides of the normal are tried, nearest first. Which side
+            // the photon should end up on depends on the surface's stored
+            // orientation, and a converted boolean solid can report a face
+            // whose normal is not the one bounding the volume the photon has
+            // to leave. Trying is cheap and settles it per crossing; deciding
+            // it from the sign convention got it wrong for the reflectors,
+            // where the "travelling" side points further into the volume.
+            //
+            // Escalate until the volume actually changes. The ceiling is
+            // 1e-4 cm, and 88% of crossings resolve at 1e-7 cm, so the
+            // displacement is negligible against the micron coatings for
+            // essentially every photon.
             Real3 const dir = geo.dir();
             Real3 const& normal = track.surface_physics().global_normal();
             real_type const side
@@ -161,15 +166,20 @@ CELER_FUNCTION void PostBoundaryExecutor::operator()(CoreTrackView& track) const
             Real3 const origin = geo.pos();
             real_type step = 1e-7;
             int attempt = 0;
-            for (; attempt < 4; ++attempt, step *= 10)
+            bool escaped = false;
+            for (; attempt < 4 && !escaped; ++attempt, step *= 10)
             {
-                Real3 pos = origin;
-                axpy(side * step, normal, &pos);
-                geo = GeoTrackInitializer{pos, dir, {}};
-                if (geo.failed() || geo.is_outside()
-                    || geo.volume_instance_id() != before_inst)
+                for (int flip = 0; flip < 2; ++flip)
                 {
-                    break;
+                    Real3 pos = origin;
+                    axpy((flip ? -side : side) * step, normal, &pos);
+                    geo = GeoTrackInitializer{pos, dir, {}};
+                    if (geo.failed() || geo.is_outside()
+                        || geo.volume_instance_id() != before_inst)
+                    {
+                        escaped = true;
+                        break;
+                    }
                 }
             }
 #if !CELER_DEVICE_COMPILE

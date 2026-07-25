@@ -38,6 +38,7 @@
 #include "corecel/sys/Environment.hh"
 #include "corecel/sys/ScopedProfiling.hh"
 #include "geocel/GeantGeoParams.hh"
+#include "geocel/VolumeParams.hh"
 #include "geocel/GeantUtils.hh"
 #include "celeritas/Types.hh"
 #include "celeritas/em/params/WentzelOKVIParams.hh"
@@ -100,6 +101,25 @@ void compare_geo_placement(GeantGeoParams const& ref,
                         + std::to_string(id.unchecked_get()) + ")"
                   : std::to_string(id.unchecked_get());
     };
+
+    // How big the geometry actually is. Worth stating explicitly because
+    // CCM's construction creates and deletes tens of thousands of temporary
+    // logical volumes, so the LOGICAL VOLUME IDs run to ~41k while the real
+    // volume count is far smaller -- and a performance argument built on the
+    // ID range rather than the count would be measuring nothing.
+    CELER_LOG(info) << "[GEO-SIZE] geant4: " << ref.volumes()->num_volumes()
+                    << " volumes, " << ref.volumes()->num_volume_instances()
+                    << " volume instances, "
+                    << ref.impl_volumes().size() << " impl volumes";
+    CELER_LOG(info) << "[GEO-SIZE] converted: "
+                    << test.volumes()->num_volumes() << " volumes, "
+                    << test.volumes()->num_volume_instances()
+                    << " volume instances, " << test.impl_volumes().size()
+                    << " impl volumes";
+    if (num_samples == 0)
+    {
+        return;
+    }
 
     std::mt19937 rng(12345);
     std::uniform_real_distribution<real_type> sample(-half_width, half_width);
