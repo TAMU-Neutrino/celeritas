@@ -90,6 +90,12 @@ class VecgeomTrackView
     //! A tiny push to make sure tracks do not get stuck at boundaries
     static CELER_CONSTEXPR_FUNCTION real_type extra_push() { return 1e-13; }
 
+    //! Perpendicular distance a crossed surface must be left behind by
+    static CELER_CONSTEXPR_FUNCTION real_type surface_clearance()
+    {
+        return 1e-7;
+    }
+
     //// ACCESSORS ////
 
     //!@{
@@ -600,6 +606,24 @@ CELER_FUNCTION void VecgeomTrackView::cross_boundary()
     }
 
     vgstate_ = vgnext_;
+
+    // Advance the position clear of the face just crossed. The navigator
+    // moves its evaluation point along the *direction* by a fixed push, so
+    // the perpendicular clearance it gains shrinks with the cosine of the
+    // incidence angle: a grazing crossing stays inside the surface tolerance
+    // and the same face is reported again on the next step, re-running
+    // surface physics on a photon that already crossed. Advancing along the
+    // direction keeps the track on its own trajectory; the distance is
+    // scaled so the clearance is angle-independent, and capped so an
+    // extremely grazing crossing cannot make a physically visible jump.
+    if (normal_ != Real3{0, 0, 0})
+    {
+        real_type const proj = dot_product(dir_, normal_);
+        real_type const cos_inc = proj < 0 ? -proj : proj;
+        axpy(this->surface_clearance() / max(cos_inc, real_type{0.01}),
+             dir_,
+             &pos_);
+    }
 
     CELER_ENSURE(this->is_on_boundary());
 }
