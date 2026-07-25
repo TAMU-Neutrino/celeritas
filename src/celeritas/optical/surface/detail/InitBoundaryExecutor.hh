@@ -202,6 +202,21 @@ CELER_FUNCTION void InitBoundaryExecutor::operator()(CoreTrackView& track) const
                       track.geometry().volume_id().unchecked_get(),
                       bin > 9 ? 9 : bin);
         celeritas::optical::detail::tally_optical_kill(abuf, 0, false);
+
+        // Length of the step that ended on this boundary: a crossing that
+        // the navigator invented rather than transported to shows up as a
+        // step many orders of magnitude below the volume size.
+        real_type const step = track.sim().step_length();
+        int decade = step > 0 ? static_cast<int>(std::floor(std::log10(step)))
+                              : -20;
+        char lbuf[64];
+        std::snprintf(lbuf,
+                      sizeof(lbuf),
+                      "steplen pre=%u vol=%u e=%d",
+                      dbg_pre_vol,
+                      track.geometry().volume_id().unchecked_get(),
+                      decade < -14 ? -14 : (decade > 2 ? 2 : decade));
+        celeritas::optical::detail::tally_optical_kill(lbuf, 0, false);
     }
     if (track.geometry().volume_id().unchecked_get() == 6
         && track.particle().energy().value() <= 4.576e-6)
