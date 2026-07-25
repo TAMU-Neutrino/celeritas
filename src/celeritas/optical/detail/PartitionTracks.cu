@@ -41,8 +41,10 @@ struct IsNotInactive
 /*!
  * Move the live tracks to the front of the thread-to-slot map.
  */
-size_type partition_alive(DeviceRef<CoreStateData> const& state)
+size_type partition_alive(DeviceRef<CoreStateData> const& state,
+                          size_type num_threads)
 {
+    CELER_EXPECT(num_threads <= state.track_slots.size());
     using SlotT = TrackSlotId::size_type;
     auto slots
         = state.track_slots[AllItems<SlotT, MemSpace::device>{}];
@@ -53,7 +55,7 @@ size_type partition_alive(DeviceRef<CoreStateData> const& state)
     auto last = thrust::partition(
         thrust_execute_on(state.stream_id),
         start,
-        start + slots.size(),
+        start + num_threads,
         IsNotInactive{ObserverPtr<TrackStatus const, MemSpace::device>{
             status.data()}});
     CELER_DEVICE_API_CALL(PeekAtLastError());

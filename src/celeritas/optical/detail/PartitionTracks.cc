@@ -22,14 +22,17 @@ namespace detail
  * to cover. The map stays a permutation of every slot, so the empty ones are
  * still reachable by the actions that need them.
  */
-size_type partition_alive(HostRef<CoreStateData> const& state)
+size_type partition_alive(HostRef<CoreStateData> const& state,
+                          size_type num_threads)
 {
+    CELER_EXPECT(num_threads <= state.track_slots.size());
     auto slots
         = state.track_slots[AllItems<TrackSlotId::size_type, MemSpace::host>{}];
     auto status = state.sim.status[AllItems<TrackStatus, MemSpace::host>{}];
 
     auto* last = std::partition(
-        slots.begin(), slots.end(), [&status](TrackSlotId::size_type slot) {
+        slots.begin(), slots.begin() + num_threads,
+        [&status](TrackSlotId::size_type slot) {
             return status[slot] != TrackStatus::inactive;
         });
     return static_cast<size_type>(last - slots.begin());

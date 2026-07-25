@@ -6,6 +6,8 @@
 //---------------------------------------------------------------------------//
 #include "Transporter.hh"
 
+#include <algorithm>
+
 #include "detail/PartitionTracks.hh"
 
 #include <cstdlib>
@@ -80,6 +82,13 @@ void Transporter::transport_impl(CoreState<M>& state) const
     // to be statistical rather than a missed track: with it off the loop
     // launches over every slot, exactly as before.
     static bool const compact = std::getenv("CELER_TRACK_COMPACT") != nullptr;
+    static size_type const full_partition_period = [] {
+        if (char const* s = std::getenv("CELER_TRACK_COMPACT_PERIOD"))
+        {
+            return static_cast<size_type>(std::max(1, std::atoi(s)));
+        }
+        return size_type{16};
+    }();
 
     // Loop while photons are yet to be tracked
     while (counters.num_pending > 0 || counters.num_alive > 0)
@@ -92,8 +101,26 @@ void Transporter::transport_impl(CoreState<M>& state) const
         // optical loop is tail-dominated -- a handful of photons diffusing
         // in a wavelength shifter keep it running long after the rest have
         // died -- so most of each launch would otherwise be empty slots.
-        state.active_size(compact ? detail::partition_alive(state.ref())
-                                  : state.size());
+        //
+        // A full pass costs one sweep of the whole capacity, which is what
+        // stops a large track state from paying for itself. Newly filled
+        // slots can be anywhere, so a full pass is needed to pick them up,
+        // but only periodically: in between, sweeping the active prefix
+        // alone is enough to drop the tracks that just died. A track sitting
+        // outside the prefix is not lost, only left for the next full pass,
+        // since it stays alive and the loop runs until nothing is.
+        if (compact)
+        {
+            bool const full = (num_step_iters % full_partition_period == 0);
+            size_type const num_threads
+                = full ? state.size() : state.active_size();
+            state.active_size(
+                detail::partition_alive(state.ref(), num_threads));
+        }
+        else
+        {
+            state.active_size(state.size());
+        }
 
         // Loop through actions
         for (auto const& action : actions_->step())
