@@ -90,18 +90,6 @@ CELER_FUNCTION auto VolumeSurfaceSelector::operator()(
     VolumeSurfaceView const& post_surface,
     VolumeInstanceId post_volume_inst) const -> OrientedSurface
 {
-    if (post_volume_inst == pre_volume_inst_)
-    {
-        // Boundary internal to a single volume instance. A volume has no
-        // optical interface with itself, and Geant4 never presents such a
-        // crossing; but solids converted for VecGeom/ORANGE (boolean and
-        // multi-union constituents) expose their internal boundaries to
-        // the navigator. Applying the volume's own boundary surface there
-        // re-rolls its reflectivity at every internal face, absorbing
-        // photons that should pass straight through.
-        return {};
-    }
-
     // P0 -> P1 interface surface in forward direction
     if (auto surface_id
         = pre_surface_.find_interface(pre_volume_inst_, post_volume_inst))
