@@ -24,6 +24,7 @@
 #include "ExceptionConverter.hh"
 #include "TrackingManagerConstructor.hh"
 
+#include "LocalOffloadInterface.hh"
 #include "detail/IntegrationSingleton.hh"
 
 using G4PD = G4ParticleDefinition;
@@ -157,6 +158,16 @@ void TrackingManagerIntegration::verify_local_setup()
                       "interface (11.0 or higher is required)");
 
     auto& singleton = detail::IntegrationSingleton::instance();
+
+    if (!dynamic_cast<TrackOffloadInterface*>(&singleton.local_offload()))
+    {
+        // The optical generation offload hands over one record per
+        // photon-producing step instead of tracks, so no tracking manager is
+        // attached and there is nothing to verify
+        CELER_LOG(debug) << "No track offload: skipping tracking manager "
+                            "verification";
+        return;
+    }
 
     // Set particle offloading based on user options
     auto const& user_offload = singleton.setup_options().offload_particles;
