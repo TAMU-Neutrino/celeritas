@@ -62,6 +62,12 @@ class CoreStateInterface : public AuxStateInterface
     //! Number of track slots
     virtual size_type size() const = 0;
 
+    //! Number of leading track slots holding a live track
+    virtual size_type active_size() const = 0;
+
+    //! Record how many leading slots hold a live track
+    virtual void active_size(size_type) = 0;
+
     // Inject optical primaries
     virtual void
     insert_primaries(Span<TrackInitializer const> host_primaries) = 0;
@@ -151,6 +157,18 @@ class CoreState final : public CoreStateBase
     //! Number of track slots
     size_type size() const final { return states_.size(); }
 
+    //! Number of leading track slots holding a live track. The
+    //! thread-to-slot map is kept partitioned so an action can launch over
+    //! these alone instead of every slot.
+    size_type active_size() const final { return active_size_; }
+
+    //! Record how many leading slots hold a live track
+    void active_size(size_type n) final
+    {
+        CELER_EXPECT(n <= this->size());
+        active_size_ = n;
+    }
+
     //! Synchronize and copy track initialization counters from device to host
     [[nodiscard]] CoreStateCounters sync_get_counters() const final;
 
@@ -191,6 +209,9 @@ class CoreState final : public CoreStateBase
 
     // Native pointer to ref or
     Ptr ptr_;
+
+    // Leading slots holding a live track, maintained by the partition
+    size_type active_size_{0};
 };
 
 //---------------------------------------------------------------------------//

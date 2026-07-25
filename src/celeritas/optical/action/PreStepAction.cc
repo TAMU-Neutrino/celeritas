@@ -36,7 +36,9 @@ void PreStepAction::step(CoreParams const& params, CoreStateHost& state) const
 {
     TrackSlotExecutor execute{
         params.ptr<MemSpace::native>(), state.ptr(), detail::PreStepExecutor{}};
-    return launch_action(state, execute);
+    // Covers every slot, not just the live ones: this is the action that
+    // retires killed tracks and clears the step limit on empty slots
+    return launch_action(state.size(), execute);
 }
 
 #if !CELER_USE_DEVICE

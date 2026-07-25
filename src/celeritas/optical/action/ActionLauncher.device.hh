@@ -105,8 +105,11 @@ template<class F>
 void ActionLauncher<F>::operator()(CoreState<MemSpace::device> const& state,
                                    F const& call_thread) const
 {
+    // The thread-to-slot map is partitioned with the live tracks first, so
+    // only they need covering. Actions that must also see empty slots call
+    // the thread-range overload with state.size() directly.
     return (*this)(
-        range(ThreadId{state.size()}), state.stream_id(), call_thread);
+        range(ThreadId{state.active_size()}), state.stream_id(), call_thread);
 }
 
 //---------------------------------------------------------------------------//

@@ -56,7 +56,10 @@ void launch_action(size_type num_threads, F&& execute_thread)
 template<class F>
 void launch_action(CoreState<MemSpace::host>& state, F&& execute_thread)
 {
-    return launch_action(state.size(), std::forward<F>(execute_thread));
+    // The thread-to-slot map is partitioned with the live tracks first, so
+    // only they need covering. Actions that must also see empty slots call
+    // the thread-count overload with state.size() directly.
+    return launch_action(state.active_size(), std::forward<F>(execute_thread));
 }
 
 //---------------------------------------------------------------------------//

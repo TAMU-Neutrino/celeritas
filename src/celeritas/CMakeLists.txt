@@ -122,6 +122,7 @@ list(APPEND SOURCES
   neutron/process/NeutronInelasticProcess.cc
   optical/CoreParams.cc
   optical/CoreState.cc
+  optical/detail/PartitionTracks.cc
   optical/CoreTrackData.cc
   optical/gen/CherenkovParams.cc
   optical/gen/ScintillationParams.cc
@@ -192,6 +193,7 @@ endif()
 if(CELERITAS_USE_CUDA OR CELERITAS_USE_HIP)
   list(APPEND SOURCES
     optical/detail/Filler.cu
+    optical/detail/PartitionTracks.cu
     track/detail/Filler.cu
     alongstep/detail/AlongStepKernels.cu
   )

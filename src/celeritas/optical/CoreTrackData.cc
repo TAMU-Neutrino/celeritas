@@ -6,6 +6,7 @@
 //---------------------------------------------------------------------------//
 #include "CoreTrackData.hh"
 
+#include "corecel/data/CollectionAlgorithms.hh"
 #include "corecel/data/CollectionBuilder.hh"
 
 namespace celeritas
@@ -41,6 +42,9 @@ void resize(CoreStateData<Ownership::value, M>* state,
     resize(&state->sim, size);
     resize(&state->detectors, size);
     resize(&state->init, stream_id, size);
+    // Start with thread i processing slot i; the partition reorders it
+    resize(&state->track_slots, size);
+    fill_sequence(&state->track_slots, stream_id);
     state->stream_id = stream_id;
 
     CELER_ENSURE(*state);

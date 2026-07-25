@@ -6,6 +6,8 @@
 //---------------------------------------------------------------------------//
 #include "Transporter.hh"
 
+#include "detail/PartitionTracks.hh"
+
 #include <cstdlib>
 
 #include <utility>
@@ -74,11 +76,24 @@ void Transporter::transport_impl(CoreState<M>& state) const
         accum_time = &input_.action_times->state(*state.aux()).accum_time;
     }
 
+    // Opt-in until the 1% shift it produces on a 10-event sample is shown
+    // to be statistical rather than a missed track: with it off the loop
+    // launches over every slot, exactly as before.
+    static bool const compact = std::getenv("CELER_TRACK_COMPACT") != nullptr;
+
     // Loop while photons are yet to be tracked
     while (counters.num_pending > 0 || counters.num_alive > 0)
     {
         ScopedProfiling profile_this{"step"};
         Stopwatch get_step_time;
+
+        // Gather the live tracks at the front of the thread-to-slot map so
+        // that the actions after the pre-step launch over them alone. The
+        // optical loop is tail-dominated -- a handful of photons diffusing
+        // in a wavelength shifter keep it running long after the rest have
+        // died -- so most of each launch would otherwise be empty slots.
+        state.active_size(compact ? detail::partition_alive(state.ref())
+                                  : state.size());
 
         // Loop through actions
         for (auto const& action : actions_->step())

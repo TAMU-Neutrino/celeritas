@@ -102,6 +102,8 @@ struct CoreStateData
 {
     template<class T>
     using Items = StateCollection<T, W, M>;
+    template<class T>
+    using ThreadItems = Collection<T, W, M, ThreadId>;
 
     GeoStateData<W, M> geometry;
     ParticleStateData<W, M> particle;
@@ -111,6 +113,12 @@ struct CoreStateData
     SimStateData<W, M> sim;
     DetectorStateData<W, M> detectors;
     TrackInitStateData<W, M> init;
+
+    //! Maps a launch thread to the track slot it processes. Kept partitioned
+    //! so that the live tracks come first: the optical loop is
+    //! tail-dominated, and launching over every slot spends most of each
+    //! kernel on empty ones.
+    ThreadItems<TrackSlotId::size_type> track_slots;
 
     //! Unique identifier for "thread-local" data.
     StreamId stream_id;
@@ -122,7 +130,7 @@ struct CoreStateData
     explicit CELER_FUNCTION operator bool() const
     {
         return geometry && particle && physics && rng && detectors && sim
-               && surface_physics && init && stream_id;
+               && surface_physics && init && !track_slots.empty() && stream_id;
     }
 
     //! Assign from another set of data
@@ -138,6 +146,7 @@ struct CoreStateData
         sim = other.sim;
         detectors = other.detectors;
         init = other.init;
+        track_slots = other.track_slots;
         stream_id = other.stream_id;
         return *this;
     }

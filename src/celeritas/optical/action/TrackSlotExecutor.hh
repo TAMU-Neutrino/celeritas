@@ -62,8 +62,10 @@ class TrackSlotExecutor
     //! Call the underlying function using the thread index
     CELER_FORCEINLINE_FUNCTION void operator()(ThreadId thread)
     {
-        // For optical photons, thread index maps exactly to
-        return (*this)(TrackSlotId{thread.unchecked_get()});
+        // The mapping is kept partitioned with the live tracks first, so a
+        // launch can cover only them
+        CELER_EXPECT(thread < state_->track_slots.size());
+        return (*this)(TrackSlotId{state_->track_slots[thread]});
     }
 
   private:
@@ -122,8 +124,10 @@ class ConditionalTrackSlotExecutor
     //! Call the underlying function using the thread index
     CELER_FORCEINLINE_FUNCTION void operator()(ThreadId thread)
     {
-        // For optical photons, thread index maps exactly to
-        return (*this)(TrackSlotId{thread.unchecked_get()});
+        // The mapping is kept partitioned with the live tracks first, so a
+        // launch can cover only them
+        CELER_EXPECT(thread < state_->track_slots.size());
+        return (*this)(TrackSlotId{state_->track_slots[thread]});
     }
 
   private:
