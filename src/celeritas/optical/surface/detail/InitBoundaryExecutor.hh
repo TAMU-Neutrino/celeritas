@@ -176,6 +176,40 @@ CELER_FUNCTION void InitBoundaryExecutor::operator()(CoreTrackView& track) const
     }
 #endif
 
+#if !CELER_DEVICE_COMPILE
+    // A positive value follows one primary; a negative value -N follows
+    // every primary divisible by N, which is the useful mode: most photons
+    // are absorbed before reaching any surface, so picking one by hand
+    // usually catches a photon with no history at all.
+    int const want = celeritas::optical::detail::traced_primary();
+    unsigned int const prim = track.sim().primary_id()
+                                  ? track.sim().primary_id().unchecked_get()
+                                  : ~0u;
+    if (prim != ~0u
+        && (want > 0 ? prim == static_cast<unsigned int>(want)
+                     : (want < -1 && prim % static_cast<unsigned int>(-want)
+                                         == 0)))
+    {
+        // One photon's boundary history, keyed on an identity that is the
+        // same under every driver, so two runs can be diffed line by line
+        // to find the first step where they part company.
+        char tbuf[192];
+        std::snprintf(tbuf,
+                      sizeof(tbuf),
+                      "TRACE prim=%d step=%u pre=%u post=%u surf=%u "
+                      "xyz=(%.6f,%.6f,%.6f) dir=(%.4f,%.4f,%.4f) E=%.5g",
+                      static_cast<int>(prim),
+                      static_cast<unsigned int>(track.sim().num_steps()),
+                      dbg_pre_vol,
+                      track.geometry().volume_id().unchecked_get(),
+                      oriented_surface.surface.unchecked_get(),
+                      geo.pos()[0], geo.pos()[1], geo.pos()[2],
+                      geo.dir()[0], geo.dir()[1], geo.dir()[2],
+                      track.particle().energy().value());
+        celeritas::optical::detail::trace_surface(tbuf);
+    }
+#endif
+
     // Enforce surface normal convention, swapping normal if geometry returns
     // one not entering the surface
     Real3 global_normal = geo.normal();

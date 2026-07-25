@@ -76,6 +76,19 @@ inline std::atomic<int>& traced_slot()
     return slot;
 }
 
+//! Follow one photon by its ORIGINATING PRIMARY, which is the same number
+//! under every geometry driver: the photons are made by Geant4 from the same
+//! seed either way. Tracing by track slot cannot be compared across drivers
+//! because the slot assignment differs.
+inline int traced_primary()
+{
+    static int const value = [] {
+        char const* s = std::getenv("CELER_TRACE_PRIMARY");
+        return s ? std::atoi(s) : -1;
+    }();
+    return value;
+}
+
 inline bool surface_trace_enabled()
 {
     static bool const enabled
