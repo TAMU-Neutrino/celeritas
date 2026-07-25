@@ -40,20 +40,6 @@ CELER_FUNCTION void PropagateExecutor::operator()(CoreTrackView& track)
     CELER_ASSERT(step > 0);
 
     auto&& geo = track.geometry();
-
-    // Most optical steps are far shorter than the distance to the nearest
-    // surface: in CCM, 794k of 861k visible steps per 2 events are Mie
-    // scatters inside the wavelength shifter, each ~1e-5 cm. Asking the
-    // navigator to intersect the whole geometry for those is what makes
-    // propagation 81% of GPU kernel time. A safety query answers "can this
-    // step reach anything?" without intersecting surfaces, so when it says
-    // no, the step is taken outright.
-    if (!geo.is_on_boundary() && geo.find_safety(step) > step)
-    {
-        geo.move_internal(step);
-        return;
-    }
-
     Propagation p = geo.find_next_step(step);
     if (p.boundary)
     {
