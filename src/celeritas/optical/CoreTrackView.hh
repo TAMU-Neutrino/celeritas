@@ -18,6 +18,8 @@
 #include "ParticleTrackView.hh"
 #include "PhysicsTrackView.hh"
 #include "SimTrackView.hh"
+#include <cstdlib>
+
 #include "TrackInitializer.hh"
 #include "surface/SurfacePhysicsTrackView.hh"
 
@@ -134,6 +136,29 @@ CoreTrackView::operator=(TrackInitializer const& init)
 {
     // Initialiize the sim state
     this->sim() = SimTrackView::Initializer{init.primary, init.time};
+
+#if !CELER_DEVICE_COMPILE
+    if (init.primary)
+    {
+        // Debug mode: seed each photon from its own identity rather than
+        // leaving it with whatever state its track slot happened to hold.
+        // Slot assignment differs between geometry drivers, so photon N
+        // otherwise draws a different stream in each run and its history
+        // diverges at the first scatter -- before reaching any geometry that
+        // could differ. Seeding per photon makes two drivers directly
+        // comparable, which is the only way to tell a geometry difference
+        // from a random one. Correlates streams between photons, so this is
+        // for diagnosis only.
+        static bool const per_primary
+            = std::getenv("CELER_SEED_PER_PRIMARY") != nullptr;
+        if (per_primary)
+        {
+            auto rng = this->rng();
+            rng = typename RngEngine::Initializer_t{
+                {0xc0ffeeu}, init.primary.unchecked_get(), 0};
+        }
+    }
+#endif
 
     // Initialize the geometry state
     auto geo = this->geometry();
