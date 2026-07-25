@@ -15,6 +15,7 @@
 #include "celeritas/optical/SimTrackView.hh"
 #include "celeritas/optical/Types.hh"
 #include "celeritas/optical/surface/VolumeSurfaceSelector.hh"
+#include <cmath>
 #include <cstdio>
 #include "celeritas/optical/detail/OpticalKillTally.hh"
 
@@ -184,6 +185,24 @@ CELER_FUNCTION void InitBoundaryExecutor::operator()(CoreTrackView& track) const
     }
 
 #if !CELER_DEVICE_COMPILE
+    if (track.particle().energy().value() <= 4.576e-6 && dbg_pre_vol <= 10
+        && track.geometry().volume_id().unchecked_get() <= 10)
+    {
+        // Incidence-angle histogram for the reflector/foil/argon stack:
+        // a geometry driver that reports a wrong surface normal shows up
+        // here as a different cos(theta) distribution for the same
+        // volume pair.
+        int bin = static_cast<int>(
+            10 * std::fabs(dot_product(geo.dir(), global_normal)));
+        char abuf[64];
+        std::snprintf(abuf,
+                      sizeof(abuf),
+                      "cosang pre=%u vol=%u b=%d",
+                      dbg_pre_vol,
+                      track.geometry().volume_id().unchecked_get(),
+                      bin > 9 ? 9 : bin);
+        celeritas::optical::detail::tally_optical_kill(abuf, 0, false);
+    }
     if (track.geometry().volume_id().unchecked_get() == 6
         && track.particle().energy().value() <= 4.576e-6)
     {
