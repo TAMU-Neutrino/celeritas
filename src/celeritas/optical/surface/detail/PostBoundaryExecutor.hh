@@ -114,6 +114,17 @@ CELER_FUNCTION void PostBoundaryExecutor::operator()(CoreTrackView& track) const
                               ? "neg"
                               : "pos");
             celeritas::optical::detail::tally_optical_kill(nb, dbg_before, uv);
+
+            // Is the normal the surface physics is using even a unit vector?
+            // Everything downstream -- the Fresnel angle, the reflection
+            // hemisphere, and the relocation below -- assumes it is.
+            real_type const nmag = norm(
+                track.surface_physics().global_normal());
+            celeritas::optical::detail::tally_optical_kill(
+                nmag < 0.5 ? "normal-zero"
+                           : (nmag < 1.5 ? "normal-unit" : "normal-big"),
+                dbg_before,
+                uv);
         }
 #endif
         if (!no_reloc && before_inst && !geo.failed() && !geo.is_outside()
@@ -135,14 +146,32 @@ CELER_FUNCTION void PostBoundaryExecutor::operator()(CoreTrackView& track) const
             // the boolean-solid reflectors. The normal is the one direction
             // whose perpendicular clearance is the full step regardless of
             // incidence. Sign it to the side the photon is travelling.
-            constexpr real_type clearance = 1e-7;
+            // Escalate the displacement until the volume actually changes.
+            // A single fixed step cannot work for every face: how deep the
+            // navigator's own push left the track depends on the incidence,
+            // and a boolean solid can report a face that is not where the
+            // normal says it is. The ceiling is 1e-5 cm, a hundredth of the
+            // thinnest real layer in this detector (the micron TPB coatings),
+            // so a displacement that helps is always physically negligible
+            // and one that would not be is never taken.
             Real3 const dir = geo.dir();
             Real3 const& normal = track.surface_physics().global_normal();
             real_type const side
                 = dot_product(dir, normal) < 0 ? real_type{-1} : real_type{1};
-            Real3 pos = geo.pos();
-            axpy(side * clearance, normal, &pos);
-            geo = GeoTrackInitializer{pos, dir, {}};
+            Real3 const origin = geo.pos();
+            for (real_type step : {real_type{1e-7},
+                                   real_type{1e-6},
+                                   real_type{1e-5}})
+            {
+                Real3 pos = origin;
+                axpy(side * step, normal, &pos);
+                geo = GeoTrackInitializer{pos, dir, {}};
+                if (geo.failed() || geo.is_outside()
+                    || geo.volume_instance_id() != before_inst)
+                {
+                    break;
+                }
+            }
 #if !CELER_DEVICE_COMPILE
             // Where the relocation actually landed, keyed by the volume the
             // photon was stuck in: "from" in the key, "to" in the volume
