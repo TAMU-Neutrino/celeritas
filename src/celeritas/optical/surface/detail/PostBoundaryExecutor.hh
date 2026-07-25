@@ -125,11 +125,23 @@ CELER_FUNCTION void PostBoundaryExecutor::operator()(CoreTrackView& track) const
             // leaves at a shallow angle does not clear the surface in that
             // distance, so the photon stays on the wrong side -- and its
             // next step crosses the same face again, applying that surface a
-            // second time. Relocate from a point displaced off the face.
+            // second time.
+            //
+            // Relocate from a point displaced off the face ALONG THE NORMAL,
+            // not along the direction. The clearance a displacement buys is
+            // its component perpendicular to the surface, so displacing along
+            // a grazing direction buys almost nothing and lands back inside
+            // the same volume -- measured, that is exactly what happens for
+            // the boolean-solid reflectors. The normal is the one direction
+            // whose perpendicular clearance is the full step regardless of
+            // incidence. Sign it to the side the photon is travelling.
             constexpr real_type clearance = 1e-7;
             Real3 const dir = geo.dir();
+            Real3 const& normal = track.surface_physics().global_normal();
+            real_type const side
+                = dot_product(dir, normal) < 0 ? real_type{-1} : real_type{1};
             Real3 pos = geo.pos();
-            axpy(clearance, dir, &pos);
+            axpy(side * clearance, normal, &pos);
             geo = GeoTrackInitializer{pos, dir, {}};
 #if !CELER_DEVICE_COMPILE
             // Where the relocation actually landed, keyed by the volume the
