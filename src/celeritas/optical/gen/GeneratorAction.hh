@@ -83,8 +83,10 @@ class GeneratorAction final : public GeneratorBase
     template<MemSpace M>
     void step_impl(CoreParams const&, CoreState<M>&) const;
 
-    void generate(CoreParams const&, CoreStateHost&) const;
-    void generate(CoreParams const&, CoreStateDevice&) const;
+    // num_vacancies is passed in: reading it from the state costs a full
+    // stream synchronization on device, and the caller has just read it
+    void generate(CoreParams const&, CoreStateHost&, size_type num_vacancies) const;
+    void generate(CoreParams const&, CoreStateDevice&, size_type num_vacancies) const;
 };
 
 //---------------------------------------------------------------------------//

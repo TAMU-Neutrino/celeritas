@@ -31,7 +31,8 @@ namespace optical
  * Launch a kernel to generate optical photons.
  */
 void GeneratorAction::generate(CoreParams const& params,
-                               CoreStateDevice& state) const
+                               CoreStateDevice& state,
+                               size_type num_vacancies) const
 {
     CELER_EXPECT(params.cherenkov() || params.scintillation());
     CELER_EXPECT(state.aux());
@@ -40,8 +41,10 @@ void GeneratorAction::generate(CoreParams const& params,
 
     auto& aux_state
         = get<GeneratorState<MemSpace::native>>(*state.aux(), this->aux_id());
-    size_type num_gen = min(state.sync_get_counters().num_vacancies,
-                            aux_state.counters.num_pending);
+    // num_vacancies comes from the caller's read: another one here would
+    // cost a second stream synchronization for a value that cannot have
+    // changed
+    size_type num_gen = min(num_vacancies, aux_state.counters.num_pending);
     {
         // Generate optical photons in vacant track slots
         detail::GeneratorExecutor execute{params.ptr<MemSpace::native>(),

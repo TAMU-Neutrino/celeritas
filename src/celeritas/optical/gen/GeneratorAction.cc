@@ -208,10 +208,14 @@ void GeneratorAction::step_impl(CoreParams const& params,
             state.stream_id());
     }
 
-    if (state.sync_get_counters().num_vacancies > 0 && counters.num_pending > 0)
+    // One read of the counters, reused below: on device each read is a
+    // copy plus a full stream synchronization, and nothing between here and
+    // the generation changes the vacancy count
+    size_type const num_vacancies = state.sync_get_counters().num_vacancies;
+    if (num_vacancies > 0 && counters.num_pending > 0)
     {
         // Generate the optical photons from the distribution data
-        this->generate(params, state);
+        this->generate(params, state, num_vacancies);
     }
 
     // Update the generator and optical core state counters
@@ -231,7 +235,8 @@ void GeneratorAction::step_impl(CoreParams const& params,
  * Launch a (host) kernel to generate optical photons.
  */
 void GeneratorAction::generate(CoreParams const& params,
-                               CoreStateHost& state) const
+                               CoreStateHost& state,
+                               size_type num_vacancies) const
 {
     CELER_EXPECT(params.cherenkov() || params.scintillation());
     CELER_EXPECT(state.aux());
@@ -240,8 +245,7 @@ void GeneratorAction::generate(CoreParams const& params,
 
     auto& aux_state
         = get<GeneratorState<MemSpace::native>>(*state.aux(), this->aux_id());
-    size_type num_gen = min(state.sync_get_counters().num_vacancies,
-                            aux_state.counters.num_pending);
+    size_type num_gen = min(num_vacancies, aux_state.counters.num_pending);
     {
         // Generate optical photons in vacant track slots
         detail::GeneratorExecutor execute{params.ptr<MemSpace::native>(),
@@ -262,7 +266,7 @@ void GeneratorAction::generate(CoreParams const& params,
 
 //---------------------------------------------------------------------------//
 #if !CELER_USE_DEVICE
-void GeneratorAction::generate(CoreParams const&, CoreStateDevice&) const
+void GeneratorAction::generate(CoreParams const&, CoreStateDevice&, size_type) const
 {
     CELER_NOT_CONFIGURED("CUDA OR HIP");
 }
