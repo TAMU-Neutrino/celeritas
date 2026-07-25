@@ -12,6 +12,9 @@
 #include "celeritas/optical/CoreTrackView.hh"
 #include "celeritas/optical/SimTrackView.hh"
 #include "celeritas/optical/detail/GroupVelocityCalculator.hh"
+#include "celeritas/optical/detail/OpticalKillTally.hh"
+#include <cmath>
+#include <cstdio>
 
 namespace celeritas
 {
@@ -46,6 +49,27 @@ CELER_FUNCTION void AlongStepExecutor::operator()(CoreTrackView& track)
     auto group_vel = GroupVelocityCalculator{track.material_record()}(
         track.particle().energy());
     sim.add_time(sim.step_length() / group_vel);
+
+#if !CELER_DEVICE_COMPILE
+    if (track.particle().energy().value() <= 4.576e-6)
+    {
+        // Where visible photons spend their path. Comparing this between
+        // geometry drivers says directly whether the extra bulk absorption
+        // comes from longer paths, from paths in a different material, or
+        // from more steps: the counts are steps per material, binned by the
+        // decade of the step length.
+        real_type const step = sim.step_length();
+        int decade = step > 0 ? static_cast<int>(std::floor(std::log10(step)))
+                              : -20;
+        char buf[64];
+        std::snprintf(buf,
+                      sizeof(buf),
+                      "pathmat mat=%u e=%d",
+                      track.material_record().material_id().unchecked_get(),
+                      decade < -12 ? -12 : (decade > 2 ? 2 : decade));
+        celeritas::optical::detail::tally_optical_kill(buf, 0, false);
+    }
+#endif
 
     // Increment the step counter
     sim.increment_num_steps();
