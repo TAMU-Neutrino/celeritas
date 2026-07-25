@@ -105,18 +105,20 @@ void compare_geo_placement(GeantGeoParams const& ref,
     std::uniform_real_distribution<real_type> sample(-half_width, half_width);
 
     std::map<std::pair<int, int>, size_type> disagreements;
+    std::map<int, size_type> occupancy;
     size_type num_disagree{0};
+    auto as_int = [](VolumeInstanceId id) {
+        return id ? static_cast<int>(id.unchecked_get()) : -1;
+    };
     for (size_type i = 0; i < num_samples; ++i)
     {
         Real3 point{sample(rng), sample(rng), sample(rng)};
         auto ref_id = ref.find_volume_instance_at(point);
         auto test_id = test.find_volume_instance_at(point);
+        ++occupancy[as_int(ref_id)];
         if (ref_id != test_id)
         {
             ++num_disagree;
-            auto as_int = [](VolumeInstanceId id) {
-                return id ? static_cast<int>(id.unchecked_get()) : -1;
-            };
             ++disagreements[{as_int(ref_id), as_int(test_id)}];
         }
     }
@@ -125,6 +127,22 @@ void compare_geo_placement(GeantGeoParams const& ref,
                     << num_samples << " sampled points ("
                     << (100.0 * num_disagree / num_samples)
                     << "%) are in different volumes under the two geometries";
+
+    // How many points landed in each volume: a volume that collects only a
+    // handful of samples has not been tested, however clean the total looks.
+    CELER_LOG(info) << "[GEO-COMPARE] " << occupancy.size()
+                    << " distinct volumes sampled";
+    std::vector<std::pair<int, size_type>> occ(occupancy.begin(),
+                                               occupancy.end());
+    std::sort(occ.begin(), occ.end(), [](auto const& a, auto const& b) {
+        return a.second > b.second;
+    });
+    for (auto const& [id, count] : occ)
+    {
+        CELER_LOG(info) << "[GEO-OCCUPANCY] " << count << "  "
+                        << name_of(id >= 0 ? VolumeInstanceId(id)
+                                           : VolumeInstanceId{});
+    }
 
     std::vector<std::pair<std::pair<int, int>, size_type>> sorted(
         disagreements.begin(), disagreements.end());
