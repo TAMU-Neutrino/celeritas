@@ -72,28 +72,10 @@ CELER_FUNCTION void PostBoundaryExecutor::operator()(CoreTrackView& track) const
     {
         // Re-entrant into the pre-volume
         auto geo = track.geometry();
-        VolumeInstanceId const before_inst = geo.volume_instance_id();
 #if !CELER_DEVICE_COMPILE
         unsigned int const dbg_before = geo.volume_id().unchecked_get();
 #endif
         geo.cross_boundary();
-
-        if (before_inst && !geo.failed() && !geo.is_outside()
-            && geo.volume_instance_id() == before_inst)
-        {
-            // The reflected photon was NOT returned to the volume it came
-            // from. The navigator decides where a crossing lands by pushing
-            // a fixed distance along the direction, and a reflection that
-            // leaves at a shallow angle does not clear the surface in that
-            // distance, so the photon stays on the wrong side -- and its
-            // next step crosses the same face again, applying that surface a
-            // second time. Relocate from a point displaced off the face.
-            constexpr real_type clearance = 1e-7;
-            Real3 const dir = geo.dir();
-            Real3 pos = geo.pos();
-            axpy(clearance, dir, &pos);
-            geo = GeoTrackInitializer{pos, dir, {}};
-        }
 #if !CELER_DEVICE_COMPILE
         if (int const want = celeritas::optical::detail::traced_primary();
             want != -1 && track.sim().primary_id())
