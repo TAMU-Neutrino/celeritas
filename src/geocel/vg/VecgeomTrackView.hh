@@ -184,8 +184,14 @@ class VecgeomTrackView
     // Temporary data
     real_type next_step_{0};
     bool failed_{false};
+    //! Normal of the surface crossed by this track view's last crossing
+    Real3 normal_{0, 0, 0};
 
     //// HELPER FUNCTIONS ////
+
+    // Calculate the outward normal of a state's volume at the current point
+    inline CELER_FUNCTION bool
+    calc_normal(NavStateWrapper const& state, Real3* normal) const;
 
     // Whether any next distance-to-boundary has been found
     inline CELER_FUNCTION bool has_next_step() const;
@@ -408,11 +414,76 @@ CELER_FUNCTION bool VecgeomTrackView::is_on_boundary() const
 //---------------------------------------------------------------------------//
 /*!
  * Get the surface normal of the boundary the track is currently on.
+ *
+ * The normal is evaluated during \c cross_boundary , while both the
+ * pre-crossing and post-crossing states are available: after the crossing the
+ * volume being exited is no longer reachable. If no crossing has been
+ * performed by this track view (e.g. the track was moved to a boundary but not
+ * yet crossed) the normal is evaluated from the current volume.
+ *
+ * The result points out of whichever volume owns the surface, which may be
+ * either side of the boundary; callers that need a specific orientation (such
+ * as optical surface physics) reorient it against the track direction.
  */
 CELER_FUNCTION Real3 VecgeomTrackView::normal() const
 {
-    // FIXME: temporarily return a bogus but valid surface normal
-    return this->dir();
+    CELER_EXPECT(this->is_on_boundary());
+
+    if (normal_ != Real3{0, 0, 0})
+    {
+        return normal_;
+    }
+
+    Real3 result{0, 0, 0};
+    if (!this->calc_normal(vgstate_, &result))
+    {
+        this->calc_normal(vgnext_, &result);
+    }
+    return result;
+}
+
+//---------------------------------------------------------------------------//
+/*!
+ * Calculate the outward normal of a state's volume at the current position.
+ *
+ * The point is transformed into the frame of the state's deepest volume, the
+ * solid is asked for its normal there, and the result is rotated back into the
+ * global frame. Returns whether the position is actually on that solid's
+ * surface: it is not, for instance, when the track is entering a daughter,
+ * where the position lies strictly inside the mother.
+ */
+CELER_FUNCTION bool VecgeomTrackView::calc_normal(NavStateWrapper const& state,
+                                                  Real3* normal) const
+{
+    CELER_EXPECT(normal);
+    auto const* pv = state.Top();
+    if (!pv)
+    {
+        return false;
+    }
+
+    // Transform the global point into the volume's own frame
+    vecgeom::Transformation3D trans;
+    state.TopMatrix(trans);
+    auto local_pos = trans.Transform(to_vgvector(pos_));
+
+    // The unplaced volume works in that same frame; VPlacedVolume::Normal
+    // would apply the placement transform a second time
+    VgReal3 local_normal{0, 0, 0};
+    bool on_surface
+        = pv->GetUnplacedVolume()->Normal(local_pos, local_normal);
+    if (local_normal.Mag2() == 0)
+    {
+        // Solid could not supply a normal (e.g. an interior point)
+        return false;
+    }
+
+    auto global_normal = trans.InverseTransformDirection(local_normal);
+    (*normal)[0] = global_normal[0];
+    (*normal)[1] = global_normal[1];
+    (*normal)[2] = global_normal[2];
+    *normal = make_unit_vector(*normal);
+    return on_surface;
 }
 
 //---------------------------------------------------------------------------//
@@ -516,6 +587,16 @@ CELER_FUNCTION void VecgeomTrackView::cross_boundary()
     {
         Navigator::RelocateToNextVolume(
             to_vgvector(this->pos_), to_vgvector(this->dir_), vgnext_);
+    }
+
+    // Evaluate the crossed surface's normal while the volume being exited is
+    // still reachable: the position is on its surface unless the track is
+    // entering one of its daughters, in which case the entered volume owns
+    // the surface
+    normal_ = Real3{0, 0, 0};
+    if (!this->calc_normal(vgstate_, &normal_))
+    {
+        this->calc_normal(vgnext_, &normal_);
     }
 
     vgstate_ = vgnext_;
