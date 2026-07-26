@@ -150,9 +150,6 @@ class VecgeomTrackView
     // Cross from one side of the current surface to the other
     inline CELER_FUNCTION void cross_boundary();
 
-    // Undo the last crossing, putting the track back where it came from
-    inline CELER_FUNCTION void uncross_boundary();
-
     // Change direction
     inline CELER_FUNCTION void set_dir(Real3 const& newdir);
 
@@ -602,33 +599,8 @@ CELER_FUNCTION void VecgeomTrackView::cross_boundary()
         this->calc_normal(vgnext_, &normal_);
     }
 
-    // SWAP rather than assign, so the pre-crossing state survives in
-    // vgnext_ and the crossing can be undone exactly (see
-    // uncross_boundary). Nothing reads vgnext_ between here and the next
-    // find_next_step, which overwrites it: is_next_boundary is the only
-    // reader and is private to this class.
-    vgstate_.Swap(vgnext_);
+    vgstate_ = vgnext_;
 
-    CELER_ENSURE(this->is_on_boundary());
-}
-
-//---------------------------------------------------------------------------//
-/*!
- * Undo the last crossing, putting the track back in the volume it came from.
- *
- * Reflection has to return a photon to the volume it arrived from, and doing
- * that by crossing the boundary "again" relies on the navigator relocating
- * from a point pushed a fixed distance along the direction. That fails at
- * shallow angles, and it cannot work at all on the internal face of a
- * converted boolean solid, where the same volume lies on both sides: no
- * displacement can change which volume the point is in. The pre-crossing
- * state is the exact answer and is still here, so restore it instead of
- * searching for it.
- */
-CELER_FUNCTION void VecgeomTrackView::uncross_boundary()
-{
-    CELER_EXPECT(this->is_on_boundary());
-    vgstate_.Swap(vgnext_);
     CELER_ENSURE(this->is_on_boundary());
 }
 

@@ -58,19 +58,6 @@ class VgNavStateWrapper
         return *this;
     }
 
-    //! Exchange the referenced state with another wrapper's.
-    //! Both wrappers hold references into the state collection, so this
-    //! swaps the VALUES, leaving each wrapper pointing where it did.
-    CELER_FUNCTION void Swap(VgNavStateWrapper& other)
-    {
-        VgNavStateImpl const tmp_s = this->s_;
-        VgBoundary const tmp_b = this->b_;
-        this->s_ = other.s_;
-        this->b_ = other.b_;
-        other.s_ = tmp_s;
-        other.b_ = tmp_b;
-    }
-
     //! Construct from an actual vecgeom nav state (used by ScopedVgNavState)
     CELER_FUNCTION VgNavStateWrapper& operator=(VgNavState const& other)
     {
