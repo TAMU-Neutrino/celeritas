@@ -185,6 +185,41 @@ CELER_FUNCTION void PostBoundaryExecutor::operator()(CoreTrackView& track) const
             celeritas::optical::detail::tally_optical_kill(
                 db, dbg_before,
                 track.particle().energy().value() > 4.576e-6);
+
+            if (attempt >= 4 && geo.volume_instance_id() == before_inst)
+            {
+                // Still stuck after a micron in the signed direction. Two
+                // very different things look like this and they need
+                // different fixes, so distinguish them: if a big step along
+                // the OPPOSITE side escapes, the normal points the wrong way
+                // (a boolean solid handing back the wrong constituent face);
+                // if neither side escapes at ten microns, the photon is not
+                // at this volume's face at all and no normal would help.
+                Real3 const stuck = geo.pos();
+                char const* verdict = "stuck-neither-side";
+                bool escaped_probe = false;
+                for (int flip = 0; flip < 2 && !escaped_probe; ++flip)
+                {
+                    Real3 probe = stuck;
+                    axpy((flip ? -side : side) * real_type{1e-3},
+                         normal,
+                         &probe);
+                    geo = GeoTrackInitializer{probe, dir, {}};
+                    if (!geo.failed() && !geo.is_outside()
+                        && geo.volume_instance_id() != before_inst)
+                    {
+                        escaped_probe = true;
+                        verdict = flip ? "stuck-opposite-side-works"
+                                       : "stuck-same-side-needs-10um";
+                    }
+                }
+                celeritas::optical::detail::tally_optical_kill(
+                    verdict, dbg_before,
+                    track.particle().energy().value() > 4.576e-6);
+                // Leave the track where the escalation left it
+                Real3 back = stuck;
+                geo = GeoTrackInitializer{back, dir, {}};
+            }
 #endif
 #if !CELER_DEVICE_COMPILE
             // Where the relocation actually landed, keyed by the volume the
