@@ -74,10 +74,22 @@ CELER_FUNCTION void PostBoundaryExecutor::operator()(CoreTrackView& track) const
         // Re-entrant into the pre-volume
         auto geo = track.geometry();
         VolumeInstanceId const before_inst = geo.volume_instance_id();
+
 #if !CELER_DEVICE_COMPILE
         unsigned int const dbg_before = geo.volume_id().unchecked_get();
 #endif
+#if CELERITAS_CORE_GEO == CELERITAS_CORE_GEO_VECGEOM
+        // Exact undo: the state this crossing came FROM is still held, so
+        // restore it rather than asking the navigator to find it again by
+        // relocating from a displaced point. That search fails at shallow
+        // angles, and on the internal face of a converted boolean solid it
+        // cannot succeed at all -- the same volume is on both sides, so no
+        // displacement changes which volume the point is in. Those were the
+        // ~1800 photons per 2 events that stayed stuck after every attempt.
+        geo.uncross_boundary();
+#else
         geo.cross_boundary();
+#endif
 
 #if !CELER_DEVICE_COMPILE
         // Diagnostic gates: both of this file's displacements move a track
