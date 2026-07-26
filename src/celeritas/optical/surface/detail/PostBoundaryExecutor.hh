@@ -86,7 +86,26 @@ CELER_FUNCTION void PostBoundaryExecutor::operator()(CoreTrackView& track) const
         // cannot succeed at all -- the same volume is on both sides, so no
         // displacement changes which volume the point is in. Those were the
         // ~1800 photons per 2 events that stayed stuck after every attempt.
+        //
+        // Restoring the volume is only half of it: the track is left sitting
+        // exactly on the face, and the navigator will hand that same face
+        // back on the next step, so the photon reflects again and again
+        // until the step limit kills it. Measured: thousands of tracks per
+        // event terminated on cutoff with the restore alone. So also step
+        // off the face -- along the NORMAL, since the clearance a
+        // displacement buys is only its perpendicular component and a
+        // grazing reflected direction buys almost none.
         geo.uncross_boundary();
+        {
+            constexpr real_type clearance = 1e-7;
+            Real3 const& normal = track.surface_physics().global_normal();
+            real_type const side
+                = dot_product(geo.dir(), normal) < 0 ? real_type{-1}
+                                                     : real_type{1};
+            Real3 pos = geo.pos();
+            axpy(side * clearance, normal, &pos);
+            geo.move_internal(pos);
+        }
 #else
         geo.cross_boundary();
 #endif
