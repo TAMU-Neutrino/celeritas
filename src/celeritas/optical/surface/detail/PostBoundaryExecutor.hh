@@ -152,42 +152,28 @@ CELER_FUNCTION void PostBoundaryExecutor::operator()(CoreTrackView& track) const
             // 88% of crossings resolve at 1e-7 cm, so the displacement is
             // negligible against the micron coatings for essentially every
             // photon.
+            //
+            // Do NOT also try the opposite side when that fails: measured, it
+            // is 4x slower (the failures are the expensive path and it doubles
+            // them) and it loses light, because a photon that can be relocated
+            // to the wrong side sometimes is. The signed side is right -- 88%
+            // of crossings escape on the first try with it.
             Real3 const dir = geo.dir();
             Real3 const& normal = track.surface_physics().global_normal();
             real_type const side
                 = dot_product(dir, normal) < 0 ? real_type{-1} : real_type{1};
             Real3 const origin = geo.pos();
+            real_type step = 1e-7;
             int attempt = 0;
-            bool escaped = false;
-            // Exhaust the signed side across every step FIRST, then try the
-            // opposite side the same way. VecGeom's boolean solids do not
-            // hand back a consistently outward normal -- measured, 1,585 of
-            // the 1,797 photons that survive the signed escalation escape
-            // immediately on the opposite side, and only 173 on neither. So
-            // the sign is a good guess, not a fact.
-            //
-            // The ORDER is what matters and is why an earlier attempt failed:
-            // interleaving the two sides step by step tried the wrong side at
-            // a nanometre before the right side at ten, which relocated
-            // photons to the wrong neighbour, cost light, and ran 4x slower
-            // by doubling the expensive path for every failure. Done this
-            // way the 88% that escape at a nanometre on the signed side are
-            // untouched, and only the few that genuinely fail pay for a
-            // second sweep.
-            for (int flip = 0; flip < 2 && !escaped; ++flip)
+            for (; attempt < 4; ++attempt, step *= 10)
             {
-                real_type step = 1e-7;
-                for (int i = 0; i < 4; ++i, ++attempt, step *= 10)
+                Real3 pos = origin;
+                axpy(side * step, normal, &pos);
+                geo = GeoTrackInitializer{pos, dir, {}};
+                if (geo.failed() || geo.is_outside()
+                    || geo.volume_instance_id() != before_inst)
                 {
-                    Real3 pos = origin;
-                    axpy((flip ? -side : side) * step, normal, &pos);
-                    geo = GeoTrackInitializer{pos, dir, {}};
-                    if (geo.failed() || geo.is_outside()
-                        || geo.volume_instance_id() != before_inst)
-                    {
-                        escaped = true;
-                        break;
-                    }
+                    break;
                 }
             }
 #if !CELER_DEVICE_COMPILE
@@ -200,7 +186,7 @@ CELER_FUNCTION void PostBoundaryExecutor::operator()(CoreTrackView& track) const
                 db, dbg_before,
                 track.particle().energy().value() > 4.576e-6);
 
-            if (attempt >= 8 && geo.volume_instance_id() == before_inst)
+            if (attempt >= 4 && geo.volume_instance_id() == before_inst)
             {
                 // Still stuck after a micron in the signed direction. Two
                 // very different things look like this and they need
