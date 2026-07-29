@@ -49,7 +49,12 @@ class BVHNavigator
 #endif
 
 #ifdef VECGEOM_FLOAT_PRECISION
-    static constexpr vg_real_type kBoundaryPush = 10 * 1e-3f;
+    // Upstream's 10*1e-3 cm is 100 um. CCM's PMT wavelength-shifter coating is
+    // 2.04 um thick, so that push would carry a photon clean through the volume
+    // that produces a third of the detected light. Float rounding at this
+    // detector's ~100 cm radius is ~1.2e-5 cm, so the push has to sit above
+    // that and below the coating: 1e-5 cm is ~5% of the coating thickness.
+    static constexpr vg_real_type kBoundaryPush = 1e-5f;
 #else
     static constexpr vg_real_type kBoundaryPush = 10 * 1e-9;
 #endif
