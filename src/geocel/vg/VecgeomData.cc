@@ -15,6 +15,7 @@
 #    include <VecGeom/navigation/NavStateIndex.h>
 #endif
 
+#include "corecel/data/CollectionAlgorithms.hh"
 #include "corecel/data/CollectionBuilder.hh"
 
 #include "detail/VecgeomSetup.hh"
@@ -61,6 +62,15 @@ void resize(VecgeomStateData<Ownership::value, M>* data,
         // Path navigator stores the boundary, and surface model uses next_surf
         resize(&data->next_boundary, size);
     }
+
+    // Zero radius means "no cached safety". Device allocation does not zero,
+    // and an uninitialized radius would let the fast path fire on garbage, so
+    // fill it explicitly.
+    resize(&data->safety_pos, size);
+    resize(&data->safety_radius, size);
+    resize(&data->safety_credit, size);
+    fill(real_type{0}, &data->safety_radius);
+    fill(int{0}, &data->safety_credit);
 
     CELER_ENSURE(data);
 }

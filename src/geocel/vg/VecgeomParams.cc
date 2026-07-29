@@ -467,6 +467,20 @@ VecgeomParams::VecgeomParams(vecgeom::GeoManager const& geo,
         HostVal<VecgeomParamsData> host_data;
         host_data.scalars.host_world = geo.GetWorld();
         host_data.scalars.num_volume_levels = geo.getMaxDepth();
+        {
+            // Reuse an isotropic safety across steps too short to reach a
+            // boundary. Worth a great deal where a track scatters many times
+            // inside one thin volume, and nothing at all where every step
+            // crosses one, so it stays opt-in.
+            auto result = getenv_flag("CELER_SAFETY_CACHE", false);
+            host_data.scalars.use_safety_cache = result.value;
+            if (!result.defaulted)
+            {
+                CELER_LOG(info) << "Safety cache "
+                                << (result.value ? "enabled" : "disabled")
+                                << " by CELER_SAFETY_CACHE";
+            }
+        }
 
         if (celeritas::device())
         {

@@ -50,6 +50,8 @@ struct VecgeomScalars
     VgPlacedVolume<MemSpace::host> const* host_world{nullptr};
     VgPlacedVolume<MemSpace::device> const* device_world{nullptr};
     vol_level_uint num_volume_levels{0};
+    //! Reuse an isotropic safety across steps that cannot reach a boundary
+    bool use_safety_cache{false};
 
     template<MemSpace M>
     CELER_FUNCTION VgPlacedVolume<M> const* world() const
@@ -146,6 +148,17 @@ struct VecgeomStateData
     VgStateItems next_state;  // TODO: prev_state
     StateItems<VgBoundary> next_boundary;  // Empty if VGNAV=path
 
+    // Cached isotropic safety: no boundary of any volume lies within
+    // `safety_radius` of `safety_pos`. That is a statement about the geometry
+    // rather than about the track, so it never needs invalidating -- a track
+    // that leaves the sphere simply stops matching it.
+    StateItems<Real3> safety_pos;
+    StateItems<real_type> safety_radius;
+    // Whether computing a safety here has been paying for itself. A safety
+    // costs about as much as the step query it rides along with, so it must
+    // not be paid in volumes a track crosses in one step.
+    StateItems<int> safety_credit;
+
     //// METHODS ////
 
     //! True if sizes are consistent and states are assigned
@@ -157,7 +170,10 @@ struct VecgeomStateData
             && state.size() == pos.size()
             && boundary.size() == (CELER_VGNAV != CELER_VGNAV_PATH ? pos.size() : 0)
             && next_state.size() == pos.size()
-            && next_boundary.size() == (CELER_VGNAV != CELER_VGNAV_PATH ? pos.size() : 0);
+            && next_boundary.size() == (CELER_VGNAV != CELER_VGNAV_PATH ? pos.size() : 0)
+            && safety_pos.size() == pos.size()
+            && safety_radius.size() == pos.size()
+            && safety_credit.size() == pos.size();
         // clang-format on
     }
 
@@ -175,6 +191,9 @@ struct VecgeomStateData
         boundary = other.boundary;
         next_state = other.next_state;
         next_boundary = other.next_boundary;
+        safety_pos = other.safety_pos;
+        safety_radius = other.safety_radius;
+        safety_credit = other.safety_credit;
         return *this;
     }
 };

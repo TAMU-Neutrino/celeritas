@@ -134,15 +134,27 @@ class BVHNavigator
     //  - adds the hit daughter volume to out_state if one is hit.
     // However the function does _NOT_ relocate the state to the next volume,
     // that is entering multiple volumes that share a boundary.
+    //
+    // If `safety_out` is given, the isotropic safety at globalpoint is written
+    // there as well. It shares this call's transform and mother-volume lookup,
+    // which is most of what a standalone ComputeSafety would repeat. A track
+    // starting on a boundary has no useful safety, and its point is pushed off
+    // the surface before anything is evaluated, so that case reports zero.
     CELER_FUNCTION static double
     ComputeStepAndNextVolume(VgReal3 const& globalpoint,
                              VgReal3 const& globaldir,
                              vg_real_type step_limit,
                              NavState const& in_state,
-                             NavState& out_state)
+                             NavState& out_state,
+                             vg_real_type* safety_out = nullptr)
     {
         // If we are on the boundary, push a bit more
         vg_real_type push = in_state.IsOnBoundary() ? kBoundaryPush : 0;
+
+        if (safety_out)
+        {
+            *safety_out = 0;
+        }
 
         if (step_limit < push)
         {
@@ -160,6 +172,23 @@ class BVHNavigator
         in_state.TopMatrix(m);
         localpoint = m.Transform(globalpoint);
         localdir = m.TransformDirection(globaldir);
+
+        if (safety_out && push == 0)
+        {
+            // Same local point and same mother volume the step below uses
+            VgPlacedVol const* pvol = in_state.Top();
+            vg_real_type safety = pvol->SafetyToOut(localpoint);
+            if (safety > 0 && pvol->GetDaughters().size() > 0)
+            {
+                auto bvh
+                    = vecgeom::BVHManager::GetBVH(pvol->GetLogicalVolume()->id());
+                safety = bvh->ComputeSafety(localpoint, safety);
+            }
+            // Boolean solids report a negative "invalid side" marker rather
+            // than a distance; clamping turns that into "no cached safety"
+            *safety_out = safety > 0 ? safety : 0;
+        }
+
         // The user may want to move point from boundary before computing the
         // step
         localpoint += push * localdir;

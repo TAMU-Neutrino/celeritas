@@ -178,6 +178,10 @@ class VecgeomTrackView
     NavStateWrapper vgnext_;
     Real3& pos_;
     Real3& dir_;
+    //! Centre and radius of the cached "no boundary within" sphere
+    Real3& safety_pos_;
+    ::celeritas::real_type& safety_radius_;
+    int& safety_credit_;
 
     //!@}
 
@@ -232,6 +236,9 @@ VecgeomTrackView::VecgeomTrackView(
 #endif
     , pos_(states.pos[tid])
     , dir_(states.dir[tid])
+    , safety_pos_(states.safety_pos[tid])
+    , safety_radius_(states.safety_radius[tid])
+    , safety_credit_(states.safety_credit[tid])
 {
 }
 
@@ -613,9 +620,84 @@ CELER_FUNCTION Propagation VecgeomTrackView::find_next_step(real_type max_step)
     CELER_EXPECT(!this->is_outside());
     CELER_EXPECT(max_step > 0);
 
+#if CELERITAS_VECGEOM_VERSION < 0x020000
+    bool const use_cache = params_.scalars.use_safety_cache;
+#else
+    // The surface-model navigator does not carry the fused safety
+    constexpr bool use_cache = false;
+#endif
+
+    if (use_cache && safety_radius_ > 0 && !vgstate_.IsOnBoundary())
+    {
+        // No boundary lies within safety_radius_ of safety_pos_, so a step
+        // that stays inside that sphere cannot reach one. Unlike the cached
+        // next_step_, which set_dir throws away, the sphere is isotropic and
+        // survives every scattering event -- which is what makes it worth
+        // anything in a wavelength shifter, where a photon changes direction
+        // on every step and takes tens of them to cross a two-micron coating.
+        // |pos - centre| + max_step < radius, without the square root: this
+        // runs on every step, so the comparison is squared instead
+        ::celeritas::real_type const slack = safety_radius_ - max_step;
+        ::celeritas::real_type dist_sq{0};
+        for (int i = 0; i < 3; ++i)
+        {
+            ::celeritas::real_type const d = pos_[i] - safety_pos_[i];
+            dist_sq += d * d;
+        }
+        if (slack > 0 && dist_sq < slack * slack)
+        {
+            next_step_ = max_step;
+            // The sphere paid for itself here, so keep buying them
+            safety_credit_ = 4;
+            // Only is_next_boundary() reads vgnext_ on this path, and the
+            // caller will move internally rather than cross
+            vgnext_.SetBoundaryState(false);
+
+            Propagation result;
+            result.distance = max_step;
+            result.boundary = false;
+            return result;
+        }
+    }
+
+    // A safety costs about as much as the step query it rides along with, so
+    // it must not be bought where it cannot be used. A track crossing bulk
+    // argon reaches a boundary on nearly every step and can never take the
+    // fast path; a track diffusing inside a two-micron coating takes it
+    // repeatedly. The credit tells them apart at runtime: it is reset on every
+    // crossing so each new volume is probed once, set high whenever a sphere
+    // actually gets used, and decays otherwise until this track stops paying.
+    // This changes only WHEN a safety is computed, never what the query
+    // returns, so the output is unaffected.
+    bool const want_safety = use_cache && safety_credit_ >= 0
+                             && !vgstate_.IsOnBoundary();
+
     // TODO: vgnext is simply copied and the boundary flag optionally set
+    vg_real_type safety{0};
+#if CELERITAS_VECGEOM_VERSION < 0x020000
+    next_step_ = Navigator::ComputeStepAndNextVolume(to_vgvector(pos_),
+                                                     to_vgvector(dir_),
+                                                     max_step,
+                                                     vgstate_,
+                                                     vgnext_,
+                                                     want_safety ? &safety
+                                                                 : nullptr);
+#else
     next_step_ = Navigator::ComputeStepAndNextVolume(
         to_vgvector(pos_), to_vgvector(dir_), max_step, vgstate_, vgnext_);
+#endif
+    if (want_safety)
+    {
+        // Recentre the sphere here whether or not a safety came back: a zero
+        // radius disables the fast path, which is the right answer on a
+        // boundary and for the solids whose safety is only a marker
+        safety_pos_ = pos_;
+        safety_radius_ = safety;
+    }
+    if (use_cache)
+    {
+        safety_credit_ = max(safety_credit_ - 1, -4);
+    }
 
     next_step_ = max(next_step_, this->extra_push());
 
@@ -748,6 +830,11 @@ CELER_FUNCTION void VecgeomTrackView::cross_boundary()
     }
 
     vgstate_ = vgnext_;
+
+    // Whether a safety is worth buying is a property of the volume, so give
+    // the one being entered a single probe rather than inheriting a verdict
+    // reached somewhere else
+    safety_credit_ = 0;
 
     CELER_ENSURE(this->is_on_boundary());
 }
