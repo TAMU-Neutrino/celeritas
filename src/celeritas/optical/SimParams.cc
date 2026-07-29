@@ -6,6 +6,8 @@
 //---------------------------------------------------------------------------//
 #include "SimParams.hh"
 
+#include <cstdlib>
+
 #include "corecel/Assert.hh"
 
 #include "SimData.hh"
@@ -28,6 +30,15 @@ SimParams::SimParams(inp::OpticalTrackingLimits const& inp)
     HostVal<SimParamsData> host_data;
     host_data.max_steps = inp.steps;
     host_data.max_step_iters = inp.step_iters;
+    if (char const* s = std::getenv("CELER_OPTICAL_MAX_STEP_ITERS"))
+    {
+        // A flush iterates until its longest-lived track finishes, so one
+        // pathological photon holds the device at ~0% occupancy for the
+        // whole limit. Tightening the limit bounds that damage.
+        host_data.max_step_iters = std::atoi(s);
+        CELER_VALIDATE(host_data.max_step_iters > 0,
+                       << "invalid CELER_OPTICAL_MAX_STEP_ITERS");
+    }
 
     data_ = ParamsDataStore<SimParamsData>{std::move(host_data)};
     CELER_ENSURE(data_);
