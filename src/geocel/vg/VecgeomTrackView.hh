@@ -953,6 +953,10 @@ CELER_FUNCTION void VecgeomTrackView::cross_boundary()
     CELER_EXPECT(this->is_on_boundary());
     CELER_EXPECT(this->is_next_boundary());
 
+#if CELERITAS_VECGEOM_SURFACE && !CELER_DEVICE_COMPILE
+    auto const* dbg_pre_top = vgstate_.Top();
+#endif
+
 #if CELERITAS_VECGEOM_SURFACE
     Real3 surf_normal{0, 0, 0};
     if (*next_surf_ != vg_null_surface && vgnext_.Top() != nullptr)
@@ -1056,6 +1060,66 @@ CELER_FUNCTION void VecgeomTrackView::cross_boundary()
     // the one being entered a single probe rather than inheriting a verdict
     // reached somewhere else
     safety_credit_ = 0;
+
+#if CELERITAS_VECGEOM_SURFACE && !CELER_DEVICE_COMPILE
+    {
+        // CELER_DEBUG_SURF_DOORS: after every crossing, ask the solid model
+        // where the position actually is. A mismatch is a corrupted
+        // crossing -- the door through which a track becomes
+        // navigation-orphaned -- caught at the crossing itself rather than
+        // thousands of phantom micro-steps later.
+        static bool const check_doors
+            = std::getenv("CELER_DEBUG_SURF_DOORS") != nullptr;
+        if (check_doors)
+        {
+            // The position sits bitwise ON the crossed face, where a locate
+            // is ambiguous by construction, so ask about a point nudged
+            // along the direction of travel -- the same push the solid
+            // navigator applies before its own relocation. A correct
+            // crossing locates in the post volume and stays silent.
+            Real3 pushed{pos_[0] + real_type(1e-6) * dir_[0],
+                         pos_[1] + real_type(1e-6) * dir_[1],
+                         pos_[2] + real_type(1e-6) * dir_[2]};
+            VgNavStateImpl tmp_impl{};
+            VgBoundary tmp_b{};
+            detail::VgNavStateWrapper tmp_loc{tmp_impl, tmp_b};
+            tmp_loc.Clear();
+            detail::SolidsNavigator::LocatePointIn(
+                params_.scalars.world<MemSpace::native>(),
+                to_vgvector(pushed),
+                tmp_loc,
+                true);
+            if (tmp_loc.Top() != vgstate_.Top())
+            {
+                static std::atomic<int> door_budget{400};
+                if (door_budget.fetch_sub(1) > 0)
+                {
+                    auto lp = this->debug_local_pos();
+                    std::fprintf(
+                        stderr,
+                        "[DOOR] pre=%u post=%u located=%u onb=%d "
+                        "gp=(%.6f,%.6f,%.6f) d=(%.4f,%.4f,%.4f) "
+                        "lp=(%.6f,%.6f,%.6f) lr=%.5f\n",
+                        dbg_pre_top ? dbg_pre_top->id() : 0u,
+                        vgstate_.Top() ? vgstate_.Top()->id() : 0u,
+                        tmp_loc.Top() ? tmp_loc.Top()->id() : 0u,
+                        int(vgstate_.IsOnBoundary()),
+                        pos_[0],
+                        pos_[1],
+                        pos_[2],
+                        dir_[0],
+                        dir_[1],
+                        dir_[2],
+                        lp[0],
+                        lp[1],
+                        lp[2],
+                        std::sqrt(lp[0] * lp[0] + lp[1] * lp[1]
+                                  + lp[2] * lp[2]));
+                }
+            }
+        }
+    }
+#endif
 
     CELER_ENSURE(this->is_on_boundary());
 }
