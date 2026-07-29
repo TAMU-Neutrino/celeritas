@@ -9,6 +9,7 @@
 #include <algorithm>
 
 #include "detail/PartitionTracks.hh"
+#include "detail/SortTracks.hh"
 
 #include <cstdlib>
 
@@ -82,6 +83,11 @@ void Transporter::transport_impl(CoreState<M>& state) const
     // to be statistical rather than a missed track: with it off the loop
     // launches over every slot, exactly as before.
     static bool const compact = std::getenv("CELER_TRACK_COMPACT") != nullptr;
+    // Group the threads that will run by volume so a warp's lanes take the
+    // same path through the solid tree instead of serialising over several.
+    // Opt-in: it costs the coalescing that thread i -> slot i gives today,
+    // and which of the two wins is a property of the geometry.
+    static bool const sort_tracks = std::getenv("CELER_TRACK_SORT") != nullptr;
     static bool const trace_occupancy
         = std::getenv("CELER_DEBUG_OCCUPANCY") != nullptr;
     static size_type const full_partition_period = [] {
@@ -122,6 +128,11 @@ void Transporter::transport_impl(CoreState<M>& state) const
         else
         {
             state.active_size(state.size());
+        }
+
+        if (sort_tracks)
+        {
+            detail::sort_by_volume(state.ref(), state.active_size());
         }
 
         // Loop through actions

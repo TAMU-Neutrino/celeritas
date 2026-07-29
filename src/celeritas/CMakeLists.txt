@@ -123,6 +123,7 @@ list(APPEND SOURCES
   optical/CoreParams.cc
   optical/CoreState.cc
   optical/detail/PartitionTracks.cc
+  optical/detail/SortTracks.cc
   optical/CoreTrackData.cc
   optical/gen/CherenkovParams.cc
   optical/gen/ScintillationParams.cc
@@ -194,6 +195,7 @@ if(CELERITAS_USE_CUDA OR CELERITAS_USE_HIP)
   list(APPEND SOURCES
     optical/detail/Filler.cu
     optical/detail/PartitionTracks.cu
+    optical/detail/SortTracks.cu
     track/detail/Filler.cu
     alongstep/detail/AlongStepKernels.cu
   )
