@@ -7,6 +7,7 @@
 #include "VecgeomParams.hh"
 
 #include <cstddef>
+#include <cstdio>
 #include <vector>
 #include <VecGeom/base/BVH.h>
 #include <VecGeom/base/Config.h>
@@ -710,6 +711,31 @@ void VecgeomParams::build_surface_tracking()
         ScopedTimeAndRedirect time_and_output_("BrepHelper::Convert");
         CELER_VALIDATE(brep_helper.Convert(),
                        << "failed to convert VecGeom solids to surfaces");
+    }
+
+    if (getenv_flag("CELER_DEBUG_SURF_SHELLS", false).value)
+    {
+        // Dump the per-logical-volume surface counts for the volumes in the
+        // coating-dwell investigation: an empty or thin exiting list explains
+        // a navigator that cannot find the way out
+        auto const& surf_data = vgbrep::SurfData<vg_real_type>::Instance();
+        for (auto const& [lv_id, lv] :
+             vecgeom::GeoManager::Instance().GetLogicalVolumesMap())
+        {
+            std::string const& name = lv->GetLabel();
+            if (name.find("TPBCoating") == std::string::npos
+                && name.find("TPBFoil") == std::string::npos)
+            {
+                continue;
+            }
+            auto const& shell = surf_data.fShells[lv_id];
+            std::fprintf(stderr,
+                         "[SURFSHELL] lv=%u nexit=%d nenter=%d name=%s\n",
+                         lv_id,
+                         shell.fNExitingSurfaces,
+                         shell.fNEnteringSurfaces,
+                         name.c_str());
+        }
     }
 
     if (celeritas::device())

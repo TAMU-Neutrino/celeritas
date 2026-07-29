@@ -12,6 +12,13 @@
 #include "celeritas/optical/CoreTrackView.hh"
 #include "celeritas/optical/SimTrackView.hh"
 
+#if !CELER_DEVICE_COMPILE
+#    include <atomic>
+#    include <cmath>
+#    include <cstdio>
+#    include <cstdlib>
+#endif
+
 namespace celeritas
 {
 namespace optical
@@ -63,6 +70,43 @@ CELER_FUNCTION void PropagateExecutor::operator()(CoreTrackView& track)
 
     auto&& geo = track.geometry();
     Propagation p = geo.find_next_step(step);
+#if !CELER_DEVICE_COMPILE
+    {
+        // Debug: dump the endgame of a track approaching the step cap, to
+        // see what a stuck photon is actually doing (CELER_DEBUG_STUCK)
+        static bool const dump_stuck
+            = std::getenv("CELER_DEBUG_STUCK") != nullptr;
+        if (CELER_UNLIKELY(dump_stuck && sim.num_steps() > 99900))
+        {
+            static std::atomic<int> budget{80};
+            if (budget.fetch_sub(1) > 0)
+            {
+                auto const& dir = geo.dir();
+                auto local = geo.debug_local_pos();
+                std::fprintf(stderr,
+                             "[STUCK] n=%u vol=%u inst=%u onb=%d "
+                             "lp=(%.7f,%.7f,%.7f) lr=%.6f "
+                             "d=(%.4f,%.4f,%.4f) phys=%.3e geo=%.3e b=%d\n",
+                             sim.num_steps(),
+                             geo.volume_id().unchecked_get(),
+                             geo.volume_instance_id().unchecked_get(),
+                             int(geo.is_on_boundary()),
+                             local[0],
+                             local[1],
+                             local[2],
+                             std::sqrt(local[0] * local[0]
+                                       + local[1] * local[1]
+                                       + local[2] * local[2]),
+                             dir[0],
+                             dir[1],
+                             dir[2],
+                             double(step),
+                             double(p.distance),
+                             int(p.boundary));
+            }
+        }
+    }
+#endif
     if (p.boundary)
     {
         geo.move_to_boundary();

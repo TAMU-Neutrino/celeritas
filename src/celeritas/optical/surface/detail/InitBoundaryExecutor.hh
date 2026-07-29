@@ -159,6 +159,13 @@ CELER_FUNCTION void InitBoundaryExecutor::operator()(CoreTrackView& track) const
                 celeritas::optical::detail::tally_optical_kill(
                     "crossing-to-foil", post_vol, false);
         }
+        // Full pre->post crossing matrix (surface-navigator debugging): the
+        // per-destination tallies above cover only volumes 6-10, and the
+        // navigator comparison needs every transition, PMT shells included
+        char xkey[48];
+        std::snprintf(xkey, sizeof(xkey), "xmat_pre=%u_post", dbg_pre_vol);
+        celeritas::optical::detail::tally_optical_kill(
+            xkey, post_vol, !vis);
     }
 #endif
     auto surface_physics = track.surface_physics();

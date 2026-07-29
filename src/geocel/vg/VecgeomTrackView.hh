@@ -29,6 +29,19 @@
 #    include "detail/BVHNavigator.hh"
 #elif CELERITAS_VECGEOM_SURFACE
 #    include "detail/SurfNavigator.hh"
+#    if !CELER_DEVICE_COMPILE
+// For CELER_DEBUG_SURF_CROSSCHECK: the solid model stays loaded alongside
+// the surface model, so the same query can be put to both navigators
+#        include <atomic>
+#        include <cmath>
+#        include <cstdio>
+#        include <cstdlib>
+#        include <map>
+#        include <mutex>
+#        include <string>
+
+#        include "detail/SolidsNavigator.hh"
+#    endif
 #else
 #    include "detail/SolidsNavigator.hh"
 #endif
@@ -156,6 +169,26 @@ class VecgeomTrackView
 
     // Change direction
     inline CELER_FUNCTION void set_dir(Real3 const& newdir);
+
+#if !CELER_DEVICE_COMPILE
+    //! Debug: current position in the frame of the deepest volume instance
+    Real3 debug_local_pos() const
+    {
+        vecgeom::Transformation3D trans;
+        vgstate_.TopMatrix(trans);
+        auto local = trans.Transform(to_vgvector(pos_));
+        return {local[0], local[1], local[2]};
+    }
+
+    //! Debug: current direction in the frame of the deepest volume instance
+    Real3 debug_local_dir() const
+    {
+        vecgeom::Transformation3D trans;
+        vgstate_.TopMatrix(trans);
+        auto local = trans.TransformDirection(to_vgvector(dir_));
+        return {local[0], local[1], local[2]};
+    }
+#endif
 
   private:
     //// TYPES ////
@@ -732,6 +765,94 @@ CELER_FUNCTION Propagation VecgeomTrackView::find_next_step(real_type max_step)
         vgnext_.SetBoundaryState(false);
         next_step_ = max_step;
     }
+#    if !CELER_DEVICE_COMPILE
+    {
+        // CELER_DEBUG_SURF_CROSSCHECK: put the same query to the solid
+        // navigator and tally, by volume, whether the two agree on the
+        // distance to the next boundary. Diagnostic for the coating-dwell
+        // anomaly; costs a second navigation per step when enabled.
+        static bool const crosscheck
+            = std::getenv("CELER_DEBUG_SURF_CROSSCHECK") != nullptr;
+        if (crosscheck && !vgstate_.IsOnBoundary())
+        {
+            VgNavStateImpl tmp_impl{};
+            VgBoundary tmp_b{};
+            detail::VgNavStateWrapper tmp_next{tmp_impl, tmp_b};
+            vg_real_type solid_step
+                = detail::SolidsNavigator::ComputeStepAndNextVolume(
+                    to_vgvector(pos_),
+                    to_vgvector(dir_),
+                    max_step,
+                    vgstate_,
+                    tmp_next);
+            bool surf_hit = (*next_surf_ != vg_null_surface);
+            bool solid_hit = tmp_next.IsOnBoundary();
+            char const* rel = nullptr;
+            if (surf_hit == solid_hit)
+            {
+                vg_real_type diff = std::fabs(next_step_ - solid_step);
+                rel = (!surf_hit || diff < 1e-7) ? "agree"
+                      : next_step_ > solid_step  ? "surf-longer"
+                                                 : "surf-shorter";
+            }
+            else
+            {
+                rel = surf_hit ? "solid-miss" : "surf-miss";
+                if (!surf_hit)
+                {
+                    // Sample where the surface model misses a boundary the
+                    // solid model sees: LOCAL position and direction plus
+                    // the solid model's distance identify the missed face
+                    static std::atomic<int> miss_budget{80};
+                    if (miss_budget.fetch_sub(1) > 0)
+                    {
+                        auto lp = this->debug_local_pos();
+                        auto ld = this->debug_local_dir();
+                        std::fprintf(
+                            stderr,
+                            "[NAVMISS] vol=%u lp=(%.6f,%.6f,%.6f) lr=%.5f "
+                            "ld=(%.4f,%.4f,%.4f) solid=%.3e max=%.3e\n",
+                            this->volume_id().unchecked_get(),
+                            lp[0],
+                            lp[1],
+                            lp[2],
+                            std::sqrt(lp[0] * lp[0] + lp[1] * lp[1]
+                                      + lp[2] * lp[2]),
+                            ld[0],
+                            ld[1],
+                            ld[2],
+                            static_cast<double>(solid_step),
+                            static_cast<double>(max_step));
+                    }
+                }
+            }
+            struct NavDiffTally
+            {
+                std::mutex mutex;
+                std::map<std::string, long> counts;
+                ~NavDiffTally()
+                {
+                    for (auto const& kv : counts)
+                    {
+                        std::fprintf(stderr,
+                                     "[NAVDIFF] %s %ld\n",
+                                     kv.first.c_str(),
+                                     kv.second);
+                    }
+                }
+            };
+            static NavDiffTally tally;
+            char buf[64];
+            std::snprintf(buf,
+                          sizeof(buf),
+                          "%s vol=%u",
+                          rel,
+                          this->volume_id().unchecked_get());
+            std::lock_guard<std::mutex> lock(tally.mutex);
+            ++tally.counts[buf];
+        }
+    }
+#    endif
 #else
     next_step_ = Navigator::ComputeStepAndNextVolume(
         to_vgvector(pos_), to_vgvector(dir_), max_step, vgstate_, vgnext_);
