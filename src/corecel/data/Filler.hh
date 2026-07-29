@@ -69,6 +69,7 @@ CELER_FORCEINLINE void Filler<T, M>::fill_device_impl(Span<T>) const
 extern template class Filler<real_type, MemSpace::device>;
 extern template class Filler<size_type, MemSpace::device>;
 extern template class Filler<int, MemSpace::device>;
+extern template class Filler<long, MemSpace::device>;
 extern template class Filler<TrackSlotId, MemSpace::device>;
 #endif
 

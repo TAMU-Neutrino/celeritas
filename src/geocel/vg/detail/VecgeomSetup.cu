@@ -19,6 +19,13 @@
 #include "corecel/sys/KernelLauncher.device.hh"
 #include "corecel/sys/ThreadId.hh"
 
+#if CELERITAS_VECGEOM_SURFACE
+#    include <VecGeom/surfaces/cuda/BrepCudaManager.h>
+
+using BrepCudaManager = vgbrep::BrepCudaManager<vecgeom::Precision>;
+using SurfData = vgbrep::SurfData<vecgeom::Precision>;
+#endif
+
 namespace celeritas
 {
 namespace detail
@@ -205,6 +212,27 @@ void init_navstate_device(Span<VgNavStateImpl> states, StreamId stream)
     static KernelLauncher<decltype(execute_thread)> const launch_kernel(
         "vecgeom-init-navtuple");
     launch_kernel(states.size(), stream, execute_thread);
+}
+#endif
+
+#if CELERITAS_VECGEOM_SURFACE
+//---------------------------------------------------------------------------//
+/*!
+ * Upload surface (brep) model data to the device.
+ */
+void setup_surface_tracking_device(SurfData const& surf_data)
+{
+    BrepCudaManager::Instance().TransferSurfData(surf_data);
+    CELER_DEVICE_API_CALL(DeviceSynchronize());
+}
+
+//---------------------------------------------------------------------------//
+/*!
+ * Tear down device surface data.
+ */
+void teardown_surface_tracking_device()
+{
+    BrepCudaManager::Instance().Cleanup();
 }
 #endif
 

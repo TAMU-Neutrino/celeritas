@@ -12,6 +12,7 @@ namespace celeritas
 template class Filler<real_type, MemSpace::device>;
 template class Filler<size_type, MemSpace::device>;
 template class Filler<int, MemSpace::device>;
+template class Filler<long, MemSpace::device>;
 template class Filler<TrackSlotId, MemSpace::device>;
 //---------------------------------------------------------------------------//
 }  // namespace celeritas

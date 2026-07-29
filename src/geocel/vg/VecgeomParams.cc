@@ -18,6 +18,9 @@
 #include <VecGeom/management/ReflFactory.h>
 #include <VecGeom/volumes/LogicalVolume.h>
 #include <VecGeom/volumes/PlacedVolume.h>
+#ifdef VECGEOM_USE_SURF
+#    include <VecGeom/surfaces/BrepHelper.h>
+#endif
 
 #include "corecel/Config.hh"
 #include "corecel/DeviceRuntimeApi.hh"
@@ -458,7 +461,14 @@ VecgeomParams::VecgeomParams(vecgeom::GeoManager const& geo,
 
     {
         CELER_LOG(status) << "Initializing tracking information";
+        // The volume (solid) tracking data stays even when the surface
+        // navigator is selected: the surface model is converted from it, the
+        // device world pointer comes from it, and the boundary normal is
+        // still evaluated on the solids.
         this->build_volume_tracking();
+#if CELERITAS_VECGEOM_SURFACE
+        this->build_surface_tracking();
+#endif
     }
     {
         CELER_LOG(status) << "Constructing metadata";
@@ -584,6 +594,9 @@ VecgeomParams::~VecgeomParams()
         CELER_LOG(debug) << "Clearing VecGeom volume GPU data";
         try
         {
+#if CELERITAS_VECGEOM_SURFACE
+            detail::teardown_surface_tracking_device();
+#endif
             VG_CUDA_CALL(vecgeom::CudaManager::Instance().Clear());
         }
         catch (std::exception const& e)
@@ -595,6 +608,18 @@ VecgeomParams::~VecgeomParams()
 
     if (host_ownership_ == Ownership::value)
     {
+#if CELERITAS_VECGEOM_SURFACE
+        CELER_LOG(debug) << "Clearing VecGeom surface CPU data";
+        try
+        {
+            vgbrep::BrepHelper<vg_real_type>::Instance().ClearData();
+        }
+        catch (std::exception const& e)
+        {
+            CELER_LOG(critical)
+                << "Failed during VecGeom surface cleanup: " << e.what();
+        }
+#endif
         CELER_LOG(debug) << "Clearing VecGeom CPU data";
         vecgeom::GeoManager::Instance().Clear();
     }
@@ -656,6 +681,48 @@ inp::Model VecgeomParams::make_model_input() const
 
     v.world = id_cast<VolumeId>(geo.GetWorld()->GetLogicalVolume()->id());
     return result;
+}
+
+//---------------------------------------------------------------------------//
+/*!
+ * After loading solids, build the surface (brep) model and copy it to GPU.
+ *
+ * The conversion covers every solid this geometry uses, booleans included --
+ * g4vg's converted G4MultiUnions arrive as boolean union trees and
+ * BrepHelper's SolidConverter dispatches all three boolean kinds.
+ */
+void VecgeomParams::build_surface_tracking()
+{
+#if CELERITAS_VECGEOM_SURFACE
+    // Rebuilding the surface model during a run segfaults (VECGEOM-634), so
+    // refuse a second initialization outright
+    static int initialization_count{0};
+    CELER_VALIDATE(initialization_count == 0,
+                   << "VecGeom surface data cannot be recreated during an "
+                      "execution");
+    ++initialization_count;
+
+    auto& brep_helper = vgbrep::BrepHelper<vg_real_type>::Instance();
+    brep_helper.SetVerbosity(vecgeom_verbosity());
+
+    {
+        CELER_LOG(status) << "Building VecGeom surface model";
+        ScopedTimeAndRedirect time_and_output_("BrepHelper::Convert");
+        CELER_VALIDATE(brep_helper.Convert(),
+                       << "failed to convert VecGeom solids to surfaces");
+    }
+
+    if (celeritas::device())
+    {
+        CELER_LOG(debug) << "Transferring surface data to GPU";
+        ScopedTimeAndRedirect time_and_output_(
+            "BrepCudaManager::TransferSurfData");
+        detail::setup_surface_tracking_device(brep_helper.GetSurfData());
+        CELER_DEVICE_API_CALL(PeekAtLastError());
+    }
+#else
+    CELER_ASSERT_UNREACHABLE();
+#endif
 }
 
 //---------------------------------------------------------------------------//

@@ -27,6 +27,8 @@
 
 #if CELERITAS_VECGEOM_VERSION < 0x020000
 #    include "detail/BVHNavigator.hh"
+#elif CELERITAS_VECGEOM_SURFACE
+#    include "detail/SurfNavigator.hh"
 #else
 #    include "detail/SolidsNavigator.hh"
 #endif
@@ -69,6 +71,8 @@ class VecgeomTrackView
     using StateRef = NativeRef<VecgeomStateData>;
 #if CELERITAS_VECGEOM_VERSION < 0x020000
     using Navigator = celeritas::detail::BVHNavigator;
+#elif CELERITAS_VECGEOM_SURFACE
+    using Navigator = celeritas::detail::SurfNavigator;
 #else
     using Navigator = celeritas::detail::SolidsNavigator;
 #endif
@@ -182,6 +186,10 @@ class VecgeomTrackView
     Real3& safety_pos_;
     ::celeritas::real_type& safety_radius_;
     int& safety_credit_;
+    //! Surface hit by find_next_step, consumed by cross_boundary
+    VgSurfaceInt* next_surf_{nullptr};
+    //! Navigation state saved before the last crossing, for reflections
+    VgNavStateImpl* pre_cross_state_{nullptr};
 
     //!@}
 
@@ -240,6 +248,11 @@ VecgeomTrackView::VecgeomTrackView(
     , safety_radius_(states.safety_radius[tid])
     , safety_credit_(states.safety_credit[tid])
 {
+    if constexpr (CELERITAS_VECGEOM_SURFACE)
+    {
+        next_surf_ = &states.next_surf[tid];
+        pre_cross_state_ = &states.pre_cross_state[tid];
+    }
 }
 
 //---------------------------------------------------------------------------//
@@ -263,6 +276,12 @@ VecgeomTrackView::operator=(Initializer_t const& init)
     // Initialize direction
     dir_ = init.dir;
 
+    if constexpr (CELERITAS_VECGEOM_SURFACE)
+    {
+        // A fresh track has no pending surface crossing
+        *next_surf_ = vg_null_surface;
+    }
+
     if (init.parent)
     {
         // Copy the navigation state and position from the parent state
@@ -285,7 +304,12 @@ VecgeomTrackView::operator=(Initializer_t const& init)
 
     // Set up current state and locate daughter volume
     vgstate_.Clear();
+#if CELERITAS_VECGEOM_SURFACE
+    // The surface navigator takes a placed-volume index, not a pointer
+    VgPlacedVolumeInt world = vecgeom::NavigationState::WorldId();
+#else
     auto const* world = params_.scalars.world<MemSpace::native>();
+#endif
     // LocatePointIn sets `vgstate_`
     constexpr bool contains_point = true;
     Navigator::LocatePointIn(
@@ -682,6 +706,32 @@ CELER_FUNCTION Propagation VecgeomTrackView::find_next_step(real_type max_step)
                                                      vgnext_,
                                                      want_safety ? &safety
                                                                  : nullptr);
+#elif CELERITAS_VECGEOM_SURFACE
+    *next_surf_ = vg_null_surface;
+    next_step_ = Navigator::ComputeStepAndNextVolume(to_vgvector(pos_),
+                                                     to_vgvector(dir_),
+                                                     max_step,
+                                                     vgstate_,
+                                                     vgnext_,
+                                                     *next_surf_);
+    // The index and the flag must agree: is_next_boundary() reads the flag,
+    // and cross_boundary consumes the index
+    CELER_ASSERT((*next_surf_ != vg_null_surface) == vgnext_.IsOnBoundary());
+    if (vgstate_.IsOnBoundary() && *next_surf_ != vg_null_surface
+        && next_step_ < real_type(1e-7))
+    {
+        // A surface reported within 1e-7 cm of a just-crossed boundary is
+        // the crossed face re-reported from its far side: the thinnest real
+        // feature in this geometry sits 2e-4 cm away, three orders above
+        // this floor. Honoring the phantom hit ping-pongs the photon across
+        // the same face until the iteration cap, with the device idling at
+        // 0.02% occupancy for tens of thousands of iterations. Report no
+        // boundary within the step instead; the true boundary is found by
+        // the next query from inside the volume.
+        *next_surf_ = vg_null_surface;
+        vgnext_.SetBoundaryState(false);
+        next_step_ = max_step;
+    }
 #else
     next_step_ = Navigator::ComputeStepAndNextVolume(
         to_vgvector(pos_), to_vgvector(dir_), max_step, vgstate_, vgnext_);
@@ -782,12 +832,53 @@ CELER_FUNCTION void VecgeomTrackView::cross_boundary()
     CELER_EXPECT(this->is_on_boundary());
     CELER_EXPECT(this->is_next_boundary());
 
+#if CELERITAS_VECGEOM_SURFACE
+    Real3 surf_normal{0, 0, 0};
+    if (*next_surf_ != vg_null_surface && vgnext_.Top() != nullptr)
+    {
+        // Cross the surface found by find_next_step: this is where the
+        // volume path actually changes on the surface model. The index
+        // names a surface of the PRE-crossing volume, so it is consumed
+        // here -- and the state being left is saved first, because if the
+        // boundary physics reflects the photon, the crossing must be
+        // undone.
+        *pre_cross_state_ = vgstate_.GetState();
+        int crossed_cs{0};
+        Navigator::RelocateToNextVolume(to_vgvector(this->pos_),
+                                        to_vgvector(this->dir_),
+                                        *next_surf_,
+                                        vgnext_,
+                                        &crossed_cs);
+        *next_surf_ = vg_null_surface;
+        if (crossed_cs > 0)
+        {
+            // The crossed surface names its own normal: exact, no solid
+            // interrogation, no gradient estimate
+            auto n = Navigator::SurfaceNormal(crossed_cs,
+                                              to_vgvector(this->pos_));
+            surf_normal = {n[0], n[1], n[2]};
+        }
+    }
+    else
+    {
+        // Second crossing without an intervening find_next_step: the
+        // optical reflected re-entry. The photon returns to the volume it
+        // came from, and the saved pre-crossing state IS that volume --
+        // restoring it is exact where the solid path's displaced
+        // relocation is approximate, and costs no navigation call.
+        state_.state[tid_] = *pre_cross_state_;
+        state_.next_state[tid_] = *pre_cross_state_;
+        vgstate_.SetBoundaryState(true);
+        vgnext_.SetBoundaryState(true);
+    }
+#else
     // Relocate to next tracking volume (maybe across multiple boundaries)
     if (vgnext_.Top() != nullptr)
     {
         Navigator::RelocateToNextVolume(
             to_vgvector(this->pos_), to_vgvector(this->dir_), vgnext_);
     }
+#endif
 
     // Evaluate the crossed surface's normal while the volume being exited is
     // still reachable: the position is on its surface unless the track is
@@ -801,6 +892,15 @@ CELER_FUNCTION void VecgeomTrackView::cross_boundary()
     // correct: 269 were inverted and 1129 were more than 60 degrees off.
     // This is the value everything downstream steers by.
     normal_ = Real3{0, 0, 0};
+#if CELERITAS_VECGEOM_SURFACE
+    if (surf_normal != Real3{0, 0, 0})
+    {
+        // The surface model already identified the crossed surface; its
+        // analytic normal supersedes the solid-interrogation chain below
+        normal_ = make_unit_vector(surf_normal);
+    }
+    else
+#endif
     if (!this->calc_normal(vgstate_, &normal_))
     {
         Real3 from_next{0, 0, 0};

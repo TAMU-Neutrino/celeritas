@@ -160,6 +160,7 @@ class VecgeomParams final : public GeoParamsInterface,
     //// HELPER FUNCTIONS ////
 
     void build_volume_tracking();
+    void build_surface_tracking();
 };
 
 //---------------------------------------------------------------------------//

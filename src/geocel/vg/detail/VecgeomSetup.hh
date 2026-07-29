@@ -13,6 +13,10 @@
 #include "corecel/sys/ThreadId.hh"
 #include "geocel/vg/VecgeomTypes.hh"
 
+#if CELERITAS_VECGEOM_SURFACE && !defined(__NVCC__)
+#    include <VecGeom/surfaces/BrepHelper.h>
+#endif
+
 namespace celeritas
 {
 namespace detail
@@ -55,6 +59,16 @@ void check_other_device_pointers();
 // Default-initialize navigation state because DeviceVector doesn't
 void init_navstate_device(Span<VgNavStateImpl> nav, StreamId);
 
+#if CELERITAS_VECGEOM_SURFACE && !defined(__NVCC__)
+//---------------------------------------------------------------------------//
+// Upload surface (brep) model data to the device
+void setup_surface_tracking_device(vgbrep::SurfData<vg_real_type> const&);
+
+//---------------------------------------------------------------------------//
+// Tear down device surface data
+void teardown_surface_tracking_device();
+#endif
+
 //---------------------------------------------------------------------------//
 // INLINE DEFINITIONS
 //---------------------------------------------------------------------------//
@@ -80,6 +94,19 @@ inline void check_other_device_pointers()
 inline void init_navstate_device(Span<VgNavStateImpl>, StreamId)
 {
     // Null-op: not navtuple or CUDA not enabled
+}
+#endif
+
+#if CELERITAS_VECGEOM_SURFACE && !defined(__NVCC__) \
+    && !defined(VECGEOM_ENABLE_CUDA)
+inline void setup_surface_tracking_device(vgbrep::SurfData<vg_real_type> const&)
+{
+    CELER_ASSERT_UNREACHABLE();
+}
+
+inline void teardown_surface_tracking_device()
+{
+    CELER_ASSERT_UNREACHABLE();
 }
 #endif
 

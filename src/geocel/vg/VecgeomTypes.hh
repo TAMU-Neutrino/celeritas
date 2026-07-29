@@ -7,6 +7,7 @@
 #pragma once
 
 #include <type_traits>
+#include <VecGeom/base/Config.h>
 #include <VecGeom/base/Cuda.h>
 #include <VecGeom/base/Global.h>
 #include <VecGeom/base/Version.h>
@@ -15,6 +16,16 @@
 
 #include "corecel/OpaqueId.hh"
 #include "corecel/Types.hh"
+
+// Track with VecGeom's surface (brep) model whenever the VecGeom build
+// carries it. The solid model stays available in the same build -- the
+// surface model is constructed from it, and the normal calculation still
+// interrogates the solids -- so this selects only the navigator.
+#ifdef VECGEOM_USE_SURF
+#    define CELERITAS_VECGEOM_SURFACE 1
+#else
+#    define CELERITAS_VECGEOM_SURFACE 0
+#endif
 
 #ifndef VECGEOM_PRECISION_NAMESPACE
 // VecGeom <= 2.0.0-rc.7 puts navindex, precision in global namespace
@@ -60,6 +71,10 @@ namespace celeritas
 using VgSurfaceInt = long;
 using VgPlacedVolumeInt = int;
 using vg_real_type = VECGEOM_PRECISION_NAMESPACE::Precision;
+
+//! Sentinel for "no surface hit": the surface navigator reports the hit
+//! surface through an out parameter initialized to this value
+inline constexpr VgSurfaceInt vg_null_surface{-1};
 
 #if defined(VECGEOM_BVH_SINGLE) || defined(__DOXYGEN__)
 using vgbvh_real_type = float;

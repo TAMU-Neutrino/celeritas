@@ -72,6 +72,17 @@ void resize(VecgeomStateData<Ownership::value, M>* data,
     fill(real_type{0}, &data->safety_radius);
     fill(int{0}, &data->safety_credit);
 
+    if constexpr (CELERITAS_VECGEOM_SURFACE)
+    {
+        // Same reasoning as the safety fill: cross_boundary keys off this
+        // index, so garbage must read as "no surface hit"
+        resize(&data->next_surf, size);
+        fill(VgSurfaceInt{vg_null_surface}, &data->next_surf);
+        // No fill: only read by the reflected second crossing, which the
+        // stepping loop guarantees follows the first crossing that wrote it
+        resize(&data->pre_cross_state, size);
+    }
+
     CELER_ENSURE(data);
 }
 

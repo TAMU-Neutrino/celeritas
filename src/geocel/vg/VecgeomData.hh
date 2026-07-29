@@ -37,7 +37,6 @@ namespace celeritas
 {
 //---------------------------------------------------------------------------//
 
-inline constexpr VgSurfaceInt vg_null_surface{-1};
 inline constexpr VgNavIndex vg_outside_nav_index{0};
 
 //---------------------------------------------------------------------------//
@@ -159,6 +158,21 @@ struct VecgeomStateData
     // not be paid in volumes a track crosses in one step.
     StateItems<int> safety_credit;
 
+    // Surface hit by find_next_step, consumed by cross_boundary to cross it.
+    // The surface navigator splits what the solid one does in a single call
+    // -- the step query reports WHICH surface would be crossed, and the
+    // relocation needs that index back -- and the two calls run in separate
+    // kernels, so the index must live in the track state between them.
+    StateItems<VgSurfaceInt> next_surf;  // Empty unless using surface model
+
+    // Navigation state saved before the last surface crossing. A photon the
+    // boundary physics REFLECTS must return to the volume it came from, and
+    // that crossing arrives as a second cross_boundary in a later kernel
+    // with the surface index already consumed. Restoring this state is
+    // exact where the displaced-relocation fallback is approximate, and
+    // costs no navigation call at all.
+    StateItems<VgNavStateImpl> pre_cross_state;  // Empty unless surface model
+
     //// METHODS ////
 
     //! True if sizes are consistent and states are assigned
@@ -173,7 +187,9 @@ struct VecgeomStateData
             && next_boundary.size() == (CELER_VGNAV != CELER_VGNAV_PATH ? pos.size() : 0)
             && safety_pos.size() == pos.size()
             && safety_radius.size() == pos.size()
-            && safety_credit.size() == pos.size();
+            && safety_credit.size() == pos.size()
+            && next_surf.size() == (CELERITAS_VECGEOM_SURFACE ? pos.size() : 0)
+            && pre_cross_state.size() == (CELERITAS_VECGEOM_SURFACE ? pos.size() : 0);
         // clang-format on
     }
 
@@ -194,6 +210,8 @@ struct VecgeomStateData
         safety_pos = other.safety_pos;
         safety_radius = other.safety_radius;
         safety_credit = other.safety_credit;
+        next_surf = other.next_surf;
+        pre_cross_state = other.pre_cross_state;
         return *this;
     }
 };
