@@ -39,8 +39,22 @@ namespace detail
  * \note See and update documentation in \rstref{Boundary
  * initialization, surface_boundary_init} .
  */
+// Same register-pressure cap as the propagate kernel: this one compiles to 222
+// registers per thread, which pins occupancy at nine warps per SM. See
+// PropagateExecutor.hh for the measurement behind the numbers.
+#ifndef CELER_OPTICAL_GEO_BLOCK_SIZE
+#    define CELER_OPTICAL_GEO_BLOCK_SIZE 256
+#endif
+#ifndef CELER_OPTICAL_GEO_MIN_WARPS
+#    define CELER_OPTICAL_GEO_MIN_WARPS 32
+#endif
+
 struct InitBoundaryExecutor
 {
+    //! Celeritas turns these into __launch_bounds__ on the generated kernel
+    static constexpr int max_block_size = CELER_OPTICAL_GEO_BLOCK_SIZE;
+    static constexpr int min_warps_per_eu = CELER_OPTICAL_GEO_MIN_WARPS;
+
     // Initialize track for boundary crossing
     inline CELER_FUNCTION void operator()(CoreTrackView& track) const;
 };
