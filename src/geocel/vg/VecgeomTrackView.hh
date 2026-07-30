@@ -677,10 +677,15 @@ CELER_FUNCTION Propagation VecgeomTrackView::find_next_step(real_type max_step)
     CELER_EXPECT(!this->is_outside());
     CELER_EXPECT(max_step > 0);
 
-#if CELERITAS_VECGEOM_VERSION < 0x020000 || CELERITAS_VECGEOM_SURFACE
+#if CELERITAS_VECGEOM_VERSION < 0x020000
     bool const use_cache = params_.scalars.use_safety_cache;
 #else
-    // The VG2 solids navigator does not carry the fused safety
+    // No safety cache on either VG2 navigator. The solids navigator does
+    // not carry the fused safety; the surface navigator's ComputeSafety is
+    // UNSOUND on this geometry (vgbrep prototype): caching its radii lost
+    // 40% of the light on the 20-event CPU gate (mean 2006 vs 3342.7, 20
+    // stuck tracks) -- it reports clearances that cross real boundaries.
+    // Do not re-enable without a safety validated against the solid model.
     constexpr bool use_cache = false;
 #endif
 
@@ -764,16 +769,6 @@ CELER_FUNCTION Propagation VecgeomTrackView::find_next_step(real_type max_step)
         *next_surf_ = vg_null_surface;
         vgnext_.SetBoundaryState(false);
         next_step_ = max_step;
-    }
-    if (want_safety)
-    {
-        // Not fused with the step query as on the solid path; the surface
-        // navigator answers safeties from its own BVH. In this workload a
-        // sphere bought once covers dozens of Mie micro-steps inside a
-        // wavelength-shifter coating, which is where the credit machinery
-        // concentrates the purchases.
-        safety = Navigator::ComputeSafety(to_vgvector(pos_), vgstate_);
-        safety = safety > 0 ? safety : 0;
     }
 #    if !CELER_DEVICE_COMPILE
     {
