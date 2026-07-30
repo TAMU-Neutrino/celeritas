@@ -156,20 +156,32 @@ void LocalOpticalGenOffload::InitializeEvent(int id)
     CELER_EXPECT(id >= 0);
 
     event_id_ = id_cast<UniqueEventId>(id);
-    ++event_ordinal_;
 
-    if (LocalOpticalGenOffload::StreamingEnabled() && event_ordinal_ > 0)
+    if (LocalOpticalGenOffload::StreamingEnabled())
     {
-        // Tracks from earlier events may still be in flight on the
-        // consumer: reseeding the slot RNGs mid-transport would corrupt
-        // their streams, so streaming seeds once, from the first event
-        if (CELER_UNLIKELY(event_ordinal_ == 1))
+        // The caller supplies a monotonic event ordinal (under Geant4 MT
+        // each worker sees an increasing subset of a global sequence); it
+        // tags this event's staged bursts so the drain cursor is in the
+        // caller's coordinates
+        CELER_VALIDATE(id >= event_ordinal_,
+                       << "streaming event ordinal went backwards (" << id
+                       << " after " << event_ordinal_ << ")");
+        bool const first = event_ordinal_ < 0;
+        event_ordinal_ = id;
+        if (!first)
         {
-            CELER_LOG_LOCAL(info)
-                << "Streaming optical transport: per-event RNG reseeding "
-                   "is disabled after the first event";
+            // Tracks from earlier events may still be in flight on the
+            // consumer: reseeding the slot RNGs mid-transport would corrupt
+            // their streams, so streaming seeds once, from the first event
+            if (CELER_UNLIKELY(!reseed_note_logged_))
+            {
+                reseed_note_logged_ = true;
+                CELER_LOG_LOCAL(status)
+                    << "Streaming optical transport: per-event RNG "
+                       "reseeding is disabled after the first event";
+            }
+            return;
         }
-        return;
     }
 
     if constexpr (CELERITAS_RESEED == CELERITAS_RESEED_TRACKSLOT)
@@ -439,7 +451,8 @@ void LocalOpticalGenOffload::StartConsumer()
 
     stream_ = std::make_shared<Streaming>();
     stream_->worker = std::thread([this] { this->ConsumerLoop(); });
-    CELER_LOG_LOCAL(info) << "Started streaming optical transport consumer";
+    // Status level so the engagement marker survives default verbosity
+    CELER_LOG_LOCAL(status) << "Started streaming optical transport consumer";
 }
 
 //---------------------------------------------------------------------------//

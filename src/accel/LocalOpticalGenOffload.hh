@@ -136,8 +136,13 @@ class LocalOpticalGenOffload final : public LocalOffloadInterface
     // User hit callback, invoked from PumpStreaming on the producer thread
     HitCallbackFunc user_hit_callback_;
 
-    // Zero-based count of InitializeEvent calls, tagging staged bursts
+    // Monotonic event ordinal supplied by InitializeEvent, tagging staged
+    // bursts (the caller's coordinates; under Geant4 MT each worker sees
+    // an increasing subset of a global sequence)
     long event_ordinal_{-1};
+
+    // One-shot marker for the reseed-disabled note
+    bool reseed_note_logged_{false};
 
     //// STREAMING HELPERS ////
 
