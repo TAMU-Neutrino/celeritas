@@ -6,6 +6,10 @@
 //---------------------------------------------------------------------------//
 #include "LocalOpticalGenOffload.hh"
 
+#include <condition_variable>
+#include <cstdlib>
+#include <mutex>
+#include <thread>
 #include <G4EventManager.hh>
 #include <G4MTRunManager.hh>
 
@@ -15,8 +19,10 @@
 #include "geocel/GeantUtils.hh"
 #include "celeritas/optical/CoreParams.hh"
 #include "celeritas/optical/CoreState.hh"
+#include "celeritas/optical/SimParams.hh"
 #include "celeritas/optical/Transporter.hh"
 #include "celeritas/optical/gen/GeneratorAction.hh"
+#include "celeritas/phys/GeneratorRegistry.hh"
 
 #include "SetupOptions.hh"
 #include "SharedParams.hh"
@@ -25,14 +31,66 @@ namespace celeritas
 {
 //---------------------------------------------------------------------------//
 /*!
+ * Producer-consumer channel for streaming injection.
+ *
+ * The producer (Geant4 worker) appends record bursts and collects hits; the
+ * consumer owns the optical state and runs the transport loop. All fields
+ * are guarded by \c mutex except the thread handle.
+ */
+struct LocalOpticalGenOffload::Streaming
+{
+    struct Burst
+    {
+        long event{0};
+        std::vector<DistributionData> records;
+    };
+
+    std::mutex mutex;
+    std::condition_variable cv;  //!< wakes the consumer (burst/stop)
+    std::condition_variable cv_host;  //!< wakes barrier waits (drained)
+
+    std::vector<Burst> staged;  //!< FIFO of bursts not yet absorbed
+    std::vector<optical::DetectorHit> hit_mail;  //!< hits awaiting delivery
+    long drained_event{-1};  //!< all events through this ordinal are done
+    bool idle{true};  //!< consumer parked with nothing in flight
+    bool stop{false};  //!< request consumer exit at next drain
+
+    std::thread worker;
+
+    // Safety net for destruction without Finalize: join before the members
+    // the consumer references are torn down (this struct is declared after
+    // them, so it is destroyed first)
+    ~Streaming()
+    {
+        if (worker.joinable())
+        {
+            {
+                std::lock_guard<std::mutex> lock{mutex};
+                stop = true;
+            }
+            cv.notify_one();
+            worker.join();
+        }
+    }
+};
+//---------------------------------------------------------------------------//
+/*!
  * Construct with options and shared data.
  */
-LocalOpticalGenOffload::LocalOpticalGenOffload(SetupOptions const&,
+LocalOpticalGenOffload::LocalOpticalGenOffload(SetupOptions const& options,
                                                SharedParams& params)
 {
     CELER_VALIDATE(params.mode() == SharedParams::Mode::enabled,
                    << "cannot create local optical offload when Celeritas "
                       "offloading is disabled");
+
+    if (LocalOpticalGenOffload::StreamingEnabled() && options.optical)
+    {
+        // Keep the user hit callback for producer-side delivery: in
+        // streaming mode the detector action routes hits to the consumer's
+        // sink instead of calling it on the transport thread
+        user_hit_callback_ = options.optical->detectors.callback;
+    }
 
     // Save a pointer to the optical transporter
     transport_ = params.optical_problem_loaded().transporter;
@@ -98,6 +156,22 @@ void LocalOpticalGenOffload::InitializeEvent(int id)
     CELER_EXPECT(id >= 0);
 
     event_id_ = id_cast<UniqueEventId>(id);
+    ++event_ordinal_;
+
+    if (LocalOpticalGenOffload::StreamingEnabled() && event_ordinal_ > 0)
+    {
+        // Tracks from earlier events may still be in flight on the
+        // consumer: reseeding the slot RNGs mid-transport would corrupt
+        // their streams, so streaming seeds once, from the first event
+        if (CELER_UNLIKELY(event_ordinal_ == 1))
+        {
+            CELER_LOG_LOCAL(info)
+                << "Streaming optical transport: per-event RNG reseeding "
+                   "is disabled after the first event";
+        }
+        return;
+    }
+
     if constexpr (CELERITAS_RESEED == CELERITAS_RESEED_TRACKSLOT)
     {
         if (!(G4Threading::IsMultithreadedApplication()
@@ -129,7 +203,15 @@ void LocalOpticalGenOffload::Push(
 
     if (num_photons_ >= auto_flush_)
     {
-        this->Flush();
+        if (LocalOpticalGenOffload::StreamingEnabled())
+        {
+            // Watermark pressure: hand the records over without blocking
+            this->StageStreaming();
+        }
+        else
+        {
+            this->Flush();
+        }
     }
 }
 
@@ -140,6 +222,18 @@ void LocalOpticalGenOffload::Push(
 void LocalOpticalGenOffload::Flush()
 {
     CELER_EXPECT(*this);
+
+    if (LocalOpticalGenOffload::StreamingEnabled())
+    {
+        // Barrier with unchanged semantics: everything staged (including
+        // the tail of the buffer) is transported and every hit is
+        // delivered on this thread before returning
+        ScopedProfiling profile_this("flush-streaming");
+        this->StageStreaming();
+        this->WaitStreamingDrained();
+        this->PumpStreaming();
+        return;
+    }
 
     if (buffer_.empty())
     {
@@ -208,6 +302,16 @@ void LocalOpticalGenOffload::Finalize()
 {
     CELER_EXPECT(*this);
 
+    if (stream_)
+    {
+        // Drain and stop the consumer, then deliver any remaining hits on
+        // this thread
+        this->StageStreaming();
+        this->WaitStreamingDrained();
+        this->StopConsumer();
+        this->PumpStreaming();
+    }
+
     CELER_VALIDATE(buffer_.empty(),
                    << "offloaded photons (" << num_photons_ << " in buffer of "
                    << buffer_.size() << " distributions) were not flushed");
@@ -235,6 +339,267 @@ void LocalOpticalGenOffload::Finalize()
     *this = {};
 
     CELER_ENSURE(!*this);
+}
+
+//---------------------------------------------------------------------------//
+// STREAMING MODE
+//---------------------------------------------------------------------------//
+/*!
+ * Whether streaming injection is active.
+ */
+bool LocalOpticalGenOffload::StreamingEnabled()
+{
+    static bool const enabled
+        = std::getenv("CELER_OPTICAL_STREAMING") != nullptr;
+    return enabled;
+}
+
+//---------------------------------------------------------------------------//
+/*!
+ * Hand the buffered records to the consumer thread and return immediately.
+ */
+void LocalOpticalGenOffload::StageStreaming()
+{
+    CELER_EXPECT(*this);
+
+    if (!stream_)
+    {
+        this->StartConsumer();
+    }
+    if (buffer_.empty())
+    {
+        return;
+    }
+
+    ScopedProfiling profile_this{"stage"};
+
+    if (celeritas::device())
+    {
+        CELER_LOG_LOCAL(debug)
+            << "Staging " << num_photons_ << " optical photons of event "
+            << event_ordinal_ << " for streaming transport";
+    }
+
+    auto& sx = *stream_;
+    {
+        std::lock_guard<std::mutex> lock{sx.mutex};
+        Streaming::Burst burst;
+        burst.event = event_ordinal_ < 0 ? 0 : event_ordinal_;
+        burst.records = std::move(buffer_);
+        sx.staged.push_back(std::move(burst));
+    }
+    sx.cv.notify_one();
+
+    buffer_.clear();
+    num_photons_ = 0;
+}
+
+//---------------------------------------------------------------------------//
+/*!
+ * Deliver collected hits on the calling thread; return the drain cursor.
+ */
+long LocalOpticalGenOffload::PumpStreaming()
+{
+    if (!stream_)
+    {
+        return -1;
+    }
+
+    std::vector<optical::DetectorHit> hits;
+    long cursor;
+    {
+        std::lock_guard<std::mutex> lock{stream_->mutex};
+        hits.swap(stream_->hit_mail);
+        cursor = stream_->drained_event;
+    }
+    if (!hits.empty() && user_hit_callback_)
+    {
+        user_hit_callback_(make_span(hits));
+    }
+    return cursor;
+}
+
+//---------------------------------------------------------------------------//
+/*!
+ * Start the consumer thread (first stage on this stream).
+ */
+void LocalOpticalGenOffload::StartConsumer()
+{
+    CELER_EXPECT(!stream_);
+
+#if CELERITAS_CORE_GEO == CELERITAS_CORE_GEO_GEANT4
+    CELER_VALIDATE(celeritas::device(),
+                   << "streaming optical transport requires a device or a "
+                      "non-Geant4 optical geometry: host navigation with "
+                      "the Geant4 backend uses per-thread geometry state "
+                      "(split classes, touchable allocators) that belongs "
+                      "to the worker thread and cannot be used from the "
+                      "consumer thread");
+#endif
+
+    stream_ = std::make_shared<Streaming>();
+    stream_->worker = std::thread([this] { this->ConsumerLoop(); });
+    CELER_LOG_LOCAL(info) << "Started streaming optical transport consumer";
+}
+
+//---------------------------------------------------------------------------//
+/*!
+ * Request consumer exit and join it.
+ */
+void LocalOpticalGenOffload::StopConsumer()
+{
+    if (!stream_ || !stream_->worker.joinable())
+    {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock{stream_->mutex};
+        stream_->stop = true;
+    }
+    stream_->cv.notify_one();
+    stream_->worker.join();
+}
+
+//---------------------------------------------------------------------------//
+/*!
+ * Block until everything staged has been transported to completion.
+ */
+void LocalOpticalGenOffload::WaitStreamingDrained()
+{
+    if (!stream_)
+    {
+        return;
+    }
+    auto& sx = *stream_;
+    std::unique_lock<std::mutex> lock{sx.mutex};
+    sx.cv_host.wait(lock, [&sx] { return sx.idle && sx.staged.empty(); });
+}
+
+//---------------------------------------------------------------------------//
+/*!
+ * Consumer thread: a persistent transport loop fed by staged bursts.
+ *
+ * The loop absorbs staged bursts between step iterations, so the drain-out
+ * tail of one event's photons transports the next events' instead of
+ * idling. When nothing is staged, pending, or alive, the consumer publishes
+ * the drain cursor and parks on the condition variable.
+ */
+void LocalOpticalGenOffload::ConsumerLoop()
+{
+    // Make the process device current on this thread, as worker threads do
+    activate_device_local();
+
+    auto& sx = *stream_;
+    auto& state = *state_;
+
+    // Collect hits under the mailbox lock; the producer delivers them
+    state.hit_sink([&sx](Span<optical::DetectorHit const> hits) {
+        std::lock_guard<std::mutex> lock{sx.mutex};
+        sx.hit_mail.insert(sx.hit_mail.end(), hits.begin(), hits.end());
+    });
+
+    size_type const max_stall
+        = transport_->params()->sim()->max_step_iters();
+
+    size_type iter{0};
+    size_type stall_iters{0};
+    size_type last_inflight{0};
+    size_type last_cut{0};
+    size_type last_errored{0};
+    long absorbed_event{-1};
+
+    auto counters = state.sync_get_counters();
+
+    while (true)
+    {
+        // Absorb every burst staged so far. Taking work must clear the
+        // idle flag in the same critical section: a barrier that observed
+        // (idle && staged.empty()) between the swap and the transport
+        // would otherwise return while photons are in flight.
+        std::vector<Streaming::Burst> bursts;
+        {
+            std::lock_guard<std::mutex> lock{sx.mutex};
+            bursts.swap(sx.staged);
+            if (!bursts.empty())
+            {
+                sx.idle = false;
+            }
+        }
+        if (!bursts.empty())
+        {
+            for (auto& b : bursts)
+            {
+                generate_->append(state, make_span(b.records));
+                absorbed_event = b.event;
+            }
+            counters = state.sync_get_counters();
+            stall_iters = 0;
+        }
+
+        if (counters.num_pending > 0 || counters.num_alive > 0)
+        {
+            counters = transport_->step_once(state, iter++);
+
+            // Mirror the per-flush statistics of the blocking loop
+            state.accum().steps += counters.num_active;
+            ++state.accum().step_iters;
+            state.accum().num_cut += counters.num_cut - last_cut;
+            state.accum().num_errored += counters.num_errored - last_errored;
+            last_cut = counters.num_cut;
+            last_errored = counters.num_errored;
+
+            // The no-progress breaker replaces the per-flush iteration cap:
+            // any change of the in-flight population (deaths, generations,
+            // or injected work) counts as progress
+            size_type inflight = counters.num_pending + counters.num_alive;
+            if (inflight != last_inflight)
+            {
+                stall_iters = 0;
+            }
+            last_inflight = inflight;
+
+            if (CELER_UNLIKELY(++stall_iters >= max_stall))
+            {
+                CELER_LOG_LOCAL(error)
+                    << "Streaming optical transport made no progress over "
+                    << max_stall << " step iterations: aborting "
+                    << counters.num_alive << " alive tracks and "
+                    << counters.num_pending << " queued photons";
+                state.accum().num_cut
+                    += counters.num_active + counters.num_pending;
+                transport_->params()->gen_reg()->reset(*state.aux());
+                state.reset();
+                counters = state.sync_get_counters();
+                stall_iters = 0;
+                last_inflight = 0;
+                last_cut = 0;
+                last_errored = 0;
+            }
+            continue;
+        }
+
+        // Nothing in flight: publish the drain cursor and park
+        {
+            std::unique_lock<std::mutex> lock{sx.mutex};
+            if (!sx.staged.empty())
+            {
+                // More work arrived while stepping
+                continue;
+            }
+            sx.drained_event = absorbed_event;
+            sx.idle = true;
+            ++state.accum().flushes;
+            sx.cv_host.notify_all();
+            if (sx.stop)
+            {
+                break;
+            }
+            sx.cv.wait(lock, [&sx] { return !sx.staged.empty() || sx.stop; });
+            sx.idle = false;
+        }
+    }
+
+    state.hit_sink(nullptr);
 }
 
 //---------------------------------------------------------------------------//

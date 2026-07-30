@@ -6,6 +6,8 @@
 //---------------------------------------------------------------------------//
 #pragma once
 
+#include <functional>
+
 #include "corecel/cont/Span.hh"
 #include "corecel/data/AuxInterface.hh"
 #include "corecel/data/AuxStateVec.hh"
@@ -17,6 +19,7 @@
 #include "celeritas/track/CoreStateCounters.hh"
 
 #include "CoreTrackData.hh"
+#include "DetectorData.hh"
 #include "TrackInitializer.hh"
 
 namespace celeritas
@@ -59,6 +62,9 @@ class CoreStateInterface : public AuxStateInterface
     //! Reseed the RNGs at the start of an event for reproducibility
     virtual void reseed(std::shared_ptr<RngParams const>, UniqueEventId) = 0;
 
+    //! Reset all track slots and counters (recovery after an aborted loop)
+    virtual void reset() = 0;
+
     //! Number of track slots
     virtual size_type size() const = 0;
 
@@ -88,6 +94,7 @@ class CoreStateBase : public CoreStateInterface
     //!@{
     //! \name Type aliases
     using SPAuxStateVec = std::shared_ptr<AuxStateVec>;
+    using HitSink = std::function<void(Span<DetectorHit const>)>;
     //!@}
 
   public:
@@ -96,6 +103,15 @@ class CoreStateBase : public CoreStateInterface
 
     //! Optical loop statistics
     CounterAccumStats& accum() { return accum_; }
+
+    //! Per-stream hit redirection: when set, the detector action delivers
+    //! hits here instead of the global callback. Used by the streaming
+    //! driver so hits cross to the producer thread instead of being
+    //! delivered on the transport thread.
+    HitSink const& hit_sink() const { return hit_sink_; }
+
+    //! Set (or clear, with nullptr) the hit redirection
+    void hit_sink(HitSink sink) { hit_sink_ = std::move(sink); }
 
     //! Cumulative num_hits value already delivered: the detector action
     //! skips the hit copy when the device count has not moved
@@ -124,6 +140,9 @@ class CoreStateBase : public CoreStateInterface
 
     // Auxiliary data owned by the core state
     SPAuxStateVec aux_state_;
+
+    // Streaming hit redirection (unset outside streaming mode)
+    HitSink hit_sink_;
 
     // Hits delivered so far (see num_hits counter)
     size_type last_hit_count_{0};
@@ -202,7 +221,7 @@ class CoreState final : public CoreStateBase
     Ptr ptr() { return ptr_; }
 
     // Reset the data for a new step
-    void reset();
+    void reset() final;
 
     // Reseed the RNGs at the start of an event for reproducibility
     void reseed(std::shared_ptr<RngParams const>, UniqueEventId) final;

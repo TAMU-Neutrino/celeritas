@@ -6,10 +6,12 @@
 //---------------------------------------------------------------------------//
 #pragma once
 
+#include <memory>
 #include <vector>
 
 #include "corecel/Types.hh"
 #include "celeritas/Types.hh"
+#include "celeritas/inp/Scoring.hh"
 #include "celeritas/optical/gen/GeneratorData.hh"
 
 #include "LocalOffloadInterface.hh"
@@ -31,6 +33,14 @@ class SharedParams;
 //---------------------------------------------------------------------------//
 /*!
  * Manage offloading of optical distribution data to Celeritas.
+ *
+ * With \c CELER_OPTICAL_STREAMING set, the transport loop runs on a
+ * persistent per-stream consumer thread instead of inside Flush: staged
+ * record bursts are appended to the device queue while the loop runs, so
+ * the drain-out tail of one event transports the next events' photons and
+ * the device works while Geant4 tracks. Hits collected on the consumer are
+ * delivered on the producer thread by PumpStreaming, and Flush becomes a
+ * stage-drain-pump barrier with unchanged semantics.
  */
 class LocalOpticalGenOffload final : public LocalOffloadInterface
 {
@@ -38,6 +48,7 @@ class LocalOpticalGenOffload final : public LocalOffloadInterface
     //!@{
     //! \name Type aliases
     using DistributionData = optical::GeneratorDistributionData;
+    using HitCallbackFunc = inp::OpticalDetector::HitCallbackFunc;
     //!@}
 
   public:
@@ -78,6 +89,21 @@ class LocalOpticalGenOffload final : public LocalOffloadInterface
     //! Whether the class instance is initialized
     explicit operator bool() const { return this->Initialized(); }
 
+    //// STREAMING MODE ////
+
+    // Whether streaming injection is active (CELER_OPTICAL_STREAMING)
+    static bool StreamingEnabled();
+
+    // Hand the buffered records to the consumer thread, tagged with the
+    // current event ordinal, and return immediately
+    void StageStreaming();
+
+    // Deliver hits collected by the consumer on the calling thread and
+    // return the highest event ordinal known complete (-1 if none). The
+    // ordinal counts InitializeEvent calls on this thread, zero-based; it
+    // advances when the consumer fully drains its queue.
+    long PumpStreaming();
+
   private:
     // Transport pending optical tracks
     std::shared_ptr<optical::Transporter> transport_;
@@ -100,6 +126,25 @@ class LocalOpticalGenOffload final : public LocalOffloadInterface
     // Current event ID or manager for obtaining it
     UniqueEventId event_id_;
     G4EventManager* event_manager_{nullptr};
+
+    //// STREAMING DATA ////
+
+    // Producer-consumer channel and worker thread (see .cc)
+    struct Streaming;
+    std::shared_ptr<Streaming> stream_;
+
+    // User hit callback, invoked from PumpStreaming on the producer thread
+    HitCallbackFunc user_hit_callback_;
+
+    // Zero-based count of InitializeEvent calls, tagging staged bursts
+    long event_ordinal_{-1};
+
+    //// STREAMING HELPERS ////
+
+    void StartConsumer();
+    void StopConsumer();
+    void ConsumerLoop();
+    void WaitStreamingDrained();
 };
 
 //---------------------------------------------------------------------------//

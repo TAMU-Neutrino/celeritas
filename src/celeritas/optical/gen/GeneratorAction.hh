@@ -53,6 +53,12 @@ class GeneratorAction final : public GeneratorBase
     // Add user-provided host distribution data
     void insert(CoreStateBase&, SpanConstData) const;
 
+    // Append host distribution data while the loop is running (streaming
+    // injection): unlike insert, the buffer may still hold pending photons.
+    // Must be called from the thread driving the transport loop, between
+    // step iterations.
+    void append(CoreStateBase&, SpanConstData) const;
+
     //!@{
     //! \name Aux interface
 
@@ -79,6 +85,9 @@ class GeneratorAction final : public GeneratorBase
 
     template<MemSpace M>
     void insert_impl(CoreState<M>& state, SpanConstData data) const;
+
+    template<MemSpace M>
+    void append_impl(CoreState<M>& state, SpanConstData data) const;
 
     template<MemSpace M>
     void step_impl(CoreParams const&, CoreState<M>&) const;

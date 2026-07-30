@@ -264,6 +264,79 @@ TEST_F(LArSphereGeneratorTest, offload)
     EXPECT_VEC_EQ(expected_labels, labels);
 }
 
+TEST_F(LArSphereGeneratorTest, offload_append)
+{
+    // Streaming injection: append distributions while photons from earlier
+    // insertions are still pending, exercising the offset extension and the
+    // buffer growth paths, and check that every photon is generated exactly
+    // once
+
+    osi_.problem.generator = inp::OpticalOffloadGenerator{};
+    osi_.geant_setup.cherenkov = CherenkovPhysicsOptions{};
+    osi_.geant_setup.scintillation = ScintillationPhysicsOptions{};
+
+    // Few track slots so the queue drains over many iterations, and a small
+    // initial record capacity so appends force the buffer to grow
+    osi_.problem.capacity.tracks = 64;
+    osi_.problem.capacity.generators = 12;
+
+    auto const host_data = this->make_distributions(24);
+    size_type total_photons = 0;
+    for (auto const& dist : host_data)
+    {
+        total_photons += dist.num_photons;
+    }
+    auto chunk = [&host_data](size_type start, size_type stop) {
+        return make_span(host_data).subspan(start, stop - start);
+    };
+
+    optical::Runner run(std::move(osi_));
+    auto generate
+        = std::dynamic_pointer_cast<optical::GeneratorAction const>(
+            run.problem().generator);
+    ASSERT_TRUE(generate);
+    auto const& transport = *run.problem().transporter;
+    auto& state = run.state();
+
+    // First chunk goes through the standard insertion
+    run.insert(chunk(0, 8));
+
+    // Step to completion, appending the remaining chunks mid-flight
+    size_type iter = 0;
+    size_type appended = 8;
+    auto counters = state.sync_get_counters();
+    while (counters.num_pending > 0 || counters.num_alive > 0
+           || appended < host_data.size())
+    {
+        if (iter == 2)
+        {
+            // The first insertion must still be draining for the append to
+            // exercise the in-flight path
+            ASSERT_GT(counters.num_pending, 0);
+            generate->append(state, chunk(8, 16));
+            appended = 16;
+            counters = state.sync_get_counters();
+        }
+        else if (iter == 5)
+        {
+            ASSERT_GT(counters.num_pending, 0);
+            generate->append(state, chunk(16, 24));
+            appended = 24;
+            counters = state.sync_get_counters();
+        }
+        counters = transport.step_once(state, iter++);
+        ASSERT_LT(iter, 10000);
+    }
+
+    // Every appended photon was generated exactly once
+    auto const& gen_state = generate->counters(*state.aux());
+    EXPECT_EQ(total_photons, gen_state.accum.num_generated);
+    EXPECT_EQ(0, gen_state.counters.num_pending);
+    EXPECT_EQ(host_data.size(), gen_state.accum.buffer_size);
+    EXPECT_EQ(0, counters.num_alive);
+    EXPECT_EQ(0, counters.num_pending);
+}
+
 TEST_F(DuneGeneratorTest, offload)
 {
     // Generate Cherenkov and scintillation photons

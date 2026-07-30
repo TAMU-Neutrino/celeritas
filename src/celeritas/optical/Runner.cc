@@ -139,6 +139,16 @@ void Runner::insert(SpanConstGenDist data)
 
 //---------------------------------------------------------------------------//
 /*!
+ * Access the state (for step-wise and streaming-injection tests).
+ */
+CoreStateBase& Runner::state()
+{
+    CELER_EXPECT(state_);
+    return *state_;
+}
+
+//---------------------------------------------------------------------------//
+/*!
  * Generate optical photons and transport to completion.
  */
 auto Runner::operator()() const -> Result

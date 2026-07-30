@@ -64,7 +64,7 @@ void DetectorAction::step(CoreParams const& params, CoreStateHost& state) const
         std::copy_if(
             all_hits.begin(), all_hits.end(), temp_hits.begin(), Identity{}),
         temp_hits.end());
-    this->callback_hits(temp_hits);
+    this->callback_hits(temp_hits, state);
 }
 
 //---------------------------------------------------------------------------//
@@ -111,15 +111,24 @@ auto DetectorAction::load_hits_sync(CoreStateDevice const& state) const
  *
  * Copied hits might be invalid, and are removed before sending into the
  * callback function. The callback is only executed when a non-zero number of
- * valid hits occurs.
+ * valid hits occurs. A state with a hit sink (streaming mode) receives the
+ * hits there instead: the sink runs on the transport thread and hands them
+ * to the producer thread, whose thread-local receiver state the global
+ * callback may depend on.
  */
-void DetectorAction::callback_hits(VecHit const& hits) const
+void DetectorAction::callback_hits(VecHit const& hits,
+                                   CoreStateBase const& state) const
 {
-    // Send hits to the callback function, if there are any
-    if (!hits.empty())
+    if (hits.empty())
     {
-        callback_(make_span(hits));
+        return;
     }
+    if (auto const& sink = state.hit_sink())
+    {
+        sink(make_span(hits));
+        return;
+    }
+    callback_(make_span(hits));
 }
 
 //---------------------------------------------------------------------------//

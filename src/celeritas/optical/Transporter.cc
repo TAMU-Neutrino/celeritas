@@ -58,20 +58,16 @@ void Transporter::operator()(CoreStateBase& state) const
 
 //---------------------------------------------------------------------------//
 /*!
- * Transport all pending optical tracks.
+ * Run a single step iteration of the optical loop.
+ *
+ * This is the body of the transport loop, shared by the flush-to-drain
+ * operator() and the streaming driver. The iteration ordinal sequences the
+ * periodic full compaction pass.
  */
 template<MemSpace M>
-void Transporter::transport_impl(CoreState<M>& state) const
+CoreStateCounters Transporter::step_once_impl(CoreState<M>& state,
+                                              size_type iter_ordinal) const
 {
-    CELER_EXPECT(state.aux());
-
-    CELER_LOG_LOCAL(status) << "Transporting on " << to_cstring(M);
-
-    size_type num_step_iters{0};
-    size_type num_steps{0};
-
-    auto counters = state.sync_get_counters();
-
     // Store a pointer to aux data for timing results
     std::vector<double>* accum_time = nullptr;
     if (input_.action_times)
@@ -88,8 +84,6 @@ void Transporter::transport_impl(CoreState<M>& state) const
     // Opt-in: it costs the coalescing that thread i -> slot i gives today,
     // and which of the two wins is a property of the geometry.
     static bool const sort_tracks = std::getenv("CELER_TRACK_SORT") != nullptr;
-    static bool const trace_occupancy
-        = std::getenv("CELER_DEBUG_OCCUPANCY") != nullptr;
     static size_type const full_partition_period = [] {
         if (char const* s = std::getenv("CELER_TRACK_COMPACT_PERIOD"))
         {
@@ -98,62 +92,117 @@ void Transporter::transport_impl(CoreState<M>& state) const
         return size_type{16};
     }();
 
+    ScopedProfiling profile_this{"step"};
+    Stopwatch get_step_time;
+
+    // Gather the live tracks at the front of the thread-to-slot map so
+    // that the actions after the pre-step launch over them alone. The
+    // optical loop is tail-dominated -- a handful of photons diffusing
+    // in a wavelength shifter keep it running long after the rest have
+    // died -- so most of each launch would otherwise be empty slots.
+    //
+    // A full pass costs one sweep of the whole capacity, which is what
+    // stops a large track state from paying for itself. Newly filled
+    // slots can be anywhere, so a full pass is needed to pick them up,
+    // but only periodically: in between, sweeping the active prefix
+    // alone is enough to drop the tracks that just died. A track sitting
+    // outside the prefix is not lost, only left for the next full pass,
+    // since it stays alive and the loop runs until nothing is.
+    if (compact)
+    {
+        bool const full = (iter_ordinal % full_partition_period == 0);
+        size_type const num_threads
+            = full ? state.size() : state.active_size();
+        state.active_size(detail::partition_alive(state.ref(), num_threads));
+    }
+    else
+    {
+        state.active_size(state.size());
+    }
+
+    if (sort_tracks)
+    {
+        detail::sort_by_volume(state.ref(), state.active_size());
+    }
+
+    // Loop through actions
+    for (auto const& action : actions_->step())
+    {
+        ScopedProfiling profile_this{action->label()};
+        Stopwatch get_action_time;
+        action->step(*this->params(), state);
+        if (accum_time)
+        {
+            if (M == MemSpace::device)
+            {
+                device().stream(state.stream_id()).sync();
+            }
+            (*accum_time)[action->action_id().get()] += get_action_time();
+        }
+    }
+
+    // Retrieve the counters updated on the device during the iteration. The
+    // step instruments cover this synchronization, as they did when the
+    // read lived in the loop.
+    auto counters = state.sync_get_counters();
+
+    // Record the step time
+    if (input_.step_times)
+    {
+        if (M == MemSpace::device)
+        {
+            device().stream(state.stream_id()).sync();
+        }
+        auto& step_times = input_.step_times->state(*state.aux()).time;
+        step_times.push_back(get_step_time());
+    }
+
+    return counters;
+}
+
+//---------------------------------------------------------------------------//
+/*!
+ * Run a single step iteration (streaming driver building block).
+ */
+CoreStateCounters
+Transporter::step_once(CoreStateBase& state, size_type iter_ordinal) const
+{
+    if (auto* s = dynamic_cast<CoreStateHost*>(&state))
+    {
+        return this->step_once_impl(*s, iter_ordinal);
+    }
+    else if (auto* s = dynamic_cast<CoreStateDevice*>(&state))
+    {
+        return this->step_once_impl(*s, iter_ordinal);
+    }
+    CELER_ASSERT_UNREACHABLE();
+}
+
+//---------------------------------------------------------------------------//
+/*!
+ * Transport all pending optical tracks.
+ */
+template<MemSpace M>
+void Transporter::transport_impl(CoreState<M>& state) const
+{
+    CELER_EXPECT(state.aux());
+
+    CELER_LOG_LOCAL(status) << "Transporting on " << to_cstring(M);
+
+    size_type num_step_iters{0};
+    size_type num_steps{0};
+
+    auto counters = state.sync_get_counters();
+
+    static bool const trace_occupancy
+        = std::getenv("CELER_DEBUG_OCCUPANCY") != nullptr;
+
     // Loop while photons are yet to be tracked
     while (counters.num_pending > 0 || counters.num_alive > 0)
     {
-        ScopedProfiling profile_this{"step"};
-        Stopwatch get_step_time;
-
-        // Gather the live tracks at the front of the thread-to-slot map so
-        // that the actions after the pre-step launch over them alone. The
-        // optical loop is tail-dominated -- a handful of photons diffusing
-        // in a wavelength shifter keep it running long after the rest have
-        // died -- so most of each launch would otherwise be empty slots.
-        //
-        // A full pass costs one sweep of the whole capacity, which is what
-        // stops a large track state from paying for itself. Newly filled
-        // slots can be anywhere, so a full pass is needed to pick them up,
-        // but only periodically: in between, sweeping the active prefix
-        // alone is enough to drop the tracks that just died. A track sitting
-        // outside the prefix is not lost, only left for the next full pass,
-        // since it stays alive and the loop runs until nothing is.
-        if (compact)
-        {
-            bool const full = (num_step_iters % full_partition_period == 0);
-            size_type const num_threads
-                = full ? state.size() : state.active_size();
-            state.active_size(
-                detail::partition_alive(state.ref(), num_threads));
-        }
-        else
-        {
-            state.active_size(state.size());
-        }
-
-        if (sort_tracks)
-        {
-            detail::sort_by_volume(state.ref(), state.active_size());
-        }
-
-        // Loop through actions
-        for (auto const& action : actions_->step())
-        {
-            ScopedProfiling profile_this{action->label()};
-            Stopwatch get_action_time;
-            action->step(*this->params(), state);
-            if (accum_time)
-            {
-                if (M == MemSpace::device)
-                {
-                    device().stream(state.stream_id()).sync();
-                }
-                (*accum_time)[action->action_id().get()] += get_action_time();
-            }
-        }
-
-        // No longer have a reference to the counters, so need to retrieve the
-        // updated values
-        counters = state.sync_get_counters();
+        // Run the iteration; the returned counters were synchronized after
+        // the last action of the step
+        counters = this->step_once_impl(state, num_step_iters);
         num_steps += counters.num_active;
 
         if (CELER_UNLIKELY(trace_occupancy && num_step_iters < 40))
@@ -168,17 +217,6 @@ void Transporter::transport_impl(CoreState<M>& state) const
                 << " vacancies " << counters.num_vacancies
                 << " initializers " << counters.num_initializers
                 << " pending " << counters.num_pending;
-        }
-
-        // Record the step time
-        if (input_.step_times)
-        {
-            if (M == MemSpace::device)
-            {
-                device().stream(state.stream_id()).sync();
-            }
-            auto& step_times = input_.step_times->state(*state.aux()).time;
-            step_times.push_back(get_step_time());
         }
 
         if (CELER_UNLIKELY(

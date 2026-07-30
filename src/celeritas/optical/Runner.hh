@@ -75,6 +75,9 @@ class Runner
         return loaded_.problem.transporter->params();
     }
 
+    // Access the state (for step-wise and streaming-injection tests)
+    CoreStateBase& state();
+
     //! Access the problem setup
     setup::OpticalProblemLoaded const& problem() const
     {

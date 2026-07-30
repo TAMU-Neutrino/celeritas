@@ -66,8 +66,8 @@ class DetectorAction final : public OpticalStepActionInterface,
     // Copy hits from device
     VecHit load_hits_sync(CoreStateDevice const&) const;
 
-    // Send hits to the callback
-    void callback_hits(VecHit const&) const;
+    // Send hits to the state's sink if set, else the global callback
+    void callback_hits(VecHit const&, CoreStateBase const&) const;
 };
 
 //---------------------------------------------------------------------------//

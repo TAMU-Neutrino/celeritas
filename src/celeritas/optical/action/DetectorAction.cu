@@ -41,7 +41,7 @@ void DetectorAction::step(CoreParams const& params, CoreStateDevice& state) cons
     }
     state.last_hit_count(snapshot.num_hits);
 
-    this->callback_hits(this->load_hits_sync(state));
+    this->callback_hits(this->load_hits_sync(state), state);
 }
 
 //---------------------------------------------------------------------------//

@@ -135,6 +135,28 @@ void GeneratorAction::insert(CoreStateBase& state, SpanConstData data) const
 
 //---------------------------------------------------------------------------//
 /*!
+ * Append distribution data while transport is in flight.
+ */
+void GeneratorAction::append(CoreStateBase& state, SpanConstData data) const
+{
+    for (auto const& d : data)
+    {
+        CELER_VALIDATE(d, << "invalid optical step distribution " << d);
+    }
+
+    if (auto* s = dynamic_cast<CoreState<MemSpace::host>*>(&state))
+    {
+        return this->append_impl(*s, data);
+    }
+    else if (auto* s = dynamic_cast<CoreState<MemSpace::device>*>(&state))
+    {
+        return this->append_impl(*s, data);
+    }
+    CELER_ASSERT_UNREACHABLE();
+}
+
+//---------------------------------------------------------------------------//
+/*!
  * Execute the action with host data.
  */
 void GeneratorAction::step(CoreParams const& params, CoreStateHost& state) const
@@ -180,6 +202,95 @@ void GeneratorAction::insert_impl(CoreState<M>& state, SpanConstData data) const
     Copier<GeneratorDistributionData, M> copy_to_aux{aux_state.distributions(),
                                                      state.stream_id()};
     copy_to_aux(MemSpace::host, data);
+}
+
+//---------------------------------------------------------------------------//
+/*!
+ * Append distributions to a possibly nonempty buffer (streaming injection).
+ *
+ * The offsets hold the remaining-photon cumulative sum: the initial scan
+ * writes the prefix sum of the buffered photon counts, and every generation
+ * pass subtracts what it consumed (see \c UpdateSumExecutor), so
+ * offsets[buffer_size - 1] always equals the generator's num_pending. A
+ * full rescan of the raw photon counts would therefore resurrect consumed
+ * photons. Instead the appended records' offsets continue from the current
+ * remaining total, computed on the host and copied alongside the records:
+ * the existing prefix is untouched, so in-flight generation is unaffected.
+ */
+template<MemSpace M>
+void GeneratorAction::append_impl(CoreState<M>& state, SpanConstData data) const
+{
+    CELER_EXPECT(state.aux());
+
+    if (data.empty())
+    {
+        return;
+    }
+
+    auto& aux_state = get<GeneratorState<M>>(*state.aux(), this->aux_id());
+    auto& counters = aux_state.counters;
+
+    using DistId = ItemId<GeneratorDistributionData>;
+    using DistRange = ItemRange<GeneratorDistributionData>;
+    using OffId = ItemId<size_type>;
+    using OffRange = ItemRange<size_type>;
+
+    size_type const num_new = data.size();
+    size_type const need = counters.buffer_size + num_new;
+    if (aux_state.store.size() < need)
+    {
+        // Grow the buffer, carrying the live records and their offsets
+        StateDataStore<GeneratorStateData, M> grown{
+            state.stream_id(), max(need, 2 * aux_state.store.size())};
+        if (counters.buffer_size > 0)
+        {
+            auto old_ref = aux_state.store.ref();
+            auto new_ref = grown.ref();
+            DistRange live{DistId{0}, DistId{counters.buffer_size}};
+            OffRange live_off{OffId{0}, OffId{counters.buffer_size}};
+
+            Copier<GeneratorDistributionData, M> copy_dist{
+                new_ref.distributions[live], state.stream_id()};
+            copy_dist(M, Span<GeneratorDistributionData const>{
+                             old_ref.distributions[live].data(),
+                             counters.buffer_size});
+
+            Copier<size_type, M> copy_off{new_ref.offsets[live_off],
+                                          state.stream_id()};
+            copy_off(M, Span<size_type const>{old_ref.offsets[live_off].data(),
+                                              counters.buffer_size});
+        }
+        aux_state.store = std::move(grown);
+    }
+
+    // Continue the remaining-photon cumulative sum from the current total
+    std::vector<size_type> new_offsets(num_new);
+    size_type appended{0};
+    for (size_type i = 0; i < num_new; ++i)
+    {
+        appended += data[i].num_photons;
+        new_offsets[i] = counters.num_pending + appended;
+    }
+
+    auto ref = aux_state.store.ref();
+    Copier<GeneratorDistributionData, M> copy_dist{
+        ref.distributions[DistRange{DistId{counters.buffer_size},
+                                    DistId{need}}],
+        state.stream_id()};
+    copy_dist(MemSpace::host, data);
+
+    Copier<size_type, M> copy_off{
+        ref.offsets[OffRange{OffId{counters.buffer_size}, OffId{need}}],
+        state.stream_id()};
+    copy_off(MemSpace::host, make_span(new_offsets));
+
+    // Update the generator counters and the core pending count
+    counters.buffer_size = need;
+    counters.num_pending += appended;
+
+    auto core_counters = state.sync_get_counters();
+    core_counters.num_pending += appended;
+    state.sync_put_counters(core_counters);
 }
 
 //---------------------------------------------------------------------------//

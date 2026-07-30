@@ -63,6 +63,13 @@ class Transporter
     // Transport all pending optical tracks
     void operator()(CoreStateBase&) const;
 
+    // Run a single step iteration: the loop body of operator(), exposed so
+    // the streaming driver can interleave stepping with injection. The
+    // ordinal sequences the periodic full compaction pass and must increase
+    // by one per call on a given state. Returns the counters synchronized
+    // at the end of the iteration.
+    CoreStateCounters step_once(CoreStateBase&, size_type iter_ordinal) const;
+
     //! Access the shared params
     SPConstParams const& params() const { return input_.params; }
 
@@ -87,6 +94,9 @@ class Transporter
 
     template<MemSpace M>
     void transport_impl(CoreState<M>&) const;
+
+    template<MemSpace M>
+    CoreStateCounters step_once_impl(CoreState<M>&, size_type iter_ordinal) const;
 };
 
 //---------------------------------------------------------------------------//
