@@ -190,11 +190,12 @@ class SurfNavigator
     //! Isotropic safety at a point inside the current volume
     CELER_FUNCTION static vg_real_type
     ComputeSafety(VgReal3 const& globalpoint,
-                  NavState const& state,
+                  NavState& state,
                   vg_real_type limit
                   = std::numeric_limits<vg_real_type>::infinity())
     {
-        return Impl::ComputeSafety(globalpoint, state, limit);
+        ScopedVgNavState temp_nav{state};
+        return Impl::ComputeSafety(globalpoint, temp_nav, limit);
     }
 };
 
