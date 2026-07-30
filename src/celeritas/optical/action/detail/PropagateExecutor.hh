@@ -70,7 +70,8 @@ CELER_FUNCTION void PropagateExecutor::operator()(CoreTrackView& track)
 
     auto&& geo = track.geometry();
     Propagation p = geo.find_next_step(step);
-#if !CELER_DEVICE_COMPILE
+#if !CELER_DEVICE_COMPILE \
+    && CELERITAS_CORE_GEO == CELERITAS_CORE_GEO_VECGEOM
     {
         // Debug: dump the endgame of a track approaching the step cap, to
         // see what a stuck photon is actually doing (CELER_DEBUG_STUCK)
