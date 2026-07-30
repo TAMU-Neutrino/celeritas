@@ -38,10 +38,21 @@ DetectorAction::DetectorAction(ActionId aid, CallbackFunc const& callback)
  */
 void DetectorAction::step(CoreParams const& params, CoreStateHost& state) const
 {
-    TrackSlotExecutor execute{params.ptr<MemSpace::native>(),
-                              state.ptr(),
-                              detail::DetectorExecutor{state.ref().detectors}};
+    auto* counters
+        = static_cast<CoreStateCounters*>(state.ref().init.counters.data());
+    TrackSlotExecutor execute{
+        params.ptr<MemSpace::native>(),
+        state.ptr(),
+        detail::DetectorExecutor{state.ref().detectors, counters}};
     launch_action(state, execute);
+
+    // Skip the hit sweep when this pass scored nothing: the cumulative hit
+    // counter has not moved since the last delivery
+    if (counters->num_hits == state.last_hit_count())
+    {
+        return;
+    }
+    state.last_hit_count(counters->num_hits);
 
     auto all_hits
         = state.ref()
@@ -77,8 +88,8 @@ auto DetectorAction::load_hits_sync(CoreStateDevice const& state) const
     auto const& native_hits = state.ref().detectors.detector_hits;
     VecHit temp_hits(native_hits.size());
 
-    // Ensure the kernel copied into the device buffer before copying out
-    celeritas::device().stream(state.stream_id()).sync();
+    // The caller's counter read already synchronized the stream after the
+    // detector kernel, so the buffer is complete
 
     // Copy all track hits to host from device
     copy_to_host(native_hits, make_span(temp_hits), state.stream_id());

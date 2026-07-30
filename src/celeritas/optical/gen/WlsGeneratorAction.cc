@@ -129,6 +129,19 @@ void WlsGeneratorAction::step_impl(CoreParams const& params,
     auto& counters = aux_state.counters;
     auto& buffer = aux_state.store.ref().distributions;
 
+    // One synchronized read serves the whole pass
+    auto core_counters = state.sync_get_counters();
+
+    if (counters.buffer_size == 0 && core_counters.num_dist_written == 0)
+    {
+        // Nothing is buffered and no track has stored a distribution since
+        // the last pass: the compact, scan, fill, and counter update would
+        // all be no-ops, so skip their launches and synchronizations. Most
+        // tail iterations take this path. (The primary generator action
+        // maintains num_active every iteration regardless.)
+        return;
+    }
+
     auto num_pending_prev = counters.num_pending;
 
     // Compact the buffer, returning the total number of valid distributions
@@ -147,15 +160,18 @@ void WlsGeneratorAction::step_impl(CoreParams const& params,
             state.stream_id());
     }
 
-    // Update the core state counters with the number of new pending tracks
-    auto core_counters = state.sync_get_counters();
+    // Update the core state counters with the number of new pending tracks,
+    // consuming the fresh-distribution flag in the same write. Tracks store
+    // distributions in later (post-step) actions of the iteration, so
+    // nothing new can arrive between the read above and this write.
     core_counters.num_pending += counters.num_pending - num_pending_prev;
+    core_counters.num_dist_written = 0;
     state.sync_put_counters(core_counters);
 
     if (counters.num_pending > 0 && core_counters.num_vacancies > 0)
     {
         // Generate the optical photons from the distribution data
-        this->generate(params, state);
+        this->generate(params, state, core_counters.num_vacancies);
 
         // Compact the buffer again to remove stale distributions and free up
         // space to add new distributions during this step
@@ -177,8 +193,9 @@ void WlsGeneratorAction::step_impl(CoreParams const& params,
     fill(buffer[DistRange(DistId(counters.buffer_size),
                           DistId(counters.buffer_size + state.size()))]);
 
-    // Update the generator and optical core state counters
-    this->update_counters(state);
+    // Update the generator and optical core state counters (the kernels
+    // above do not touch them, so the snapshot is still current)
+    this->update_counters(state, core_counters);
 
     CELER_ENSURE(!counters.buffer_size == !counters.num_pending);
 }
@@ -188,14 +205,16 @@ void WlsGeneratorAction::step_impl(CoreParams const& params,
  * Launch a (host) kernel to generate optical photons.
  */
 void WlsGeneratorAction::generate(CoreParams const& params,
-                                  CoreStateHost& state) const
+                                  CoreStateHost& state,
+                                  size_type num_vacancies) const
 {
     CELER_EXPECT(state.aux());
 
     auto& aux_state = get<WlsGeneratorState<MemSpace::native>>(*state.aux(),
                                                                this->aux_id());
-    size_type num_gen = min(state.sync_get_counters().num_vacancies,
-                            aux_state.counters.num_pending);
+    // num_vacancies comes from the caller's read: another one here would
+    // cost a stream synchronization for a value that cannot have changed
+    size_type num_gen = min(num_vacancies, aux_state.counters.num_pending);
 
     // Generate optical photons in vacant track slots
     detail::WlsGeneratorExecutor execute{
@@ -210,7 +229,7 @@ void WlsGeneratorAction::generate(CoreParams const& params,
 
 //---------------------------------------------------------------------------//
 #if !CELER_USE_DEVICE
-void WlsGeneratorAction::generate(CoreParams const&, CoreStateDevice&) const
+void WlsGeneratorAction::generate(CoreParams const&, CoreStateDevice&, size_type) const
 {
     CELER_NOT_CONFIGURED("CUDA OR HIP");
 }

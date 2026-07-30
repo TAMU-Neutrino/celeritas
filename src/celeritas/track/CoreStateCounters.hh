@@ -61,6 +61,18 @@ struct CoreStateCounters
     size_type num_cut{0};  //!< Number of tracks killed by tracking cuts
     size_type num_errored{0};  //!< Number of tracks killed due to errors
     //!@}
+
+    //!@{
+    //! \name Atomically incremented during optical stepping
+    //! Cumulative count of scored detector hits: lets the detector action
+    //! skip the hit copy on iterations that scored none (the tail is mostly
+    //! such iterations)
+    size_type num_hits{0};
+    //! WLS distributions written by tracks since the WLS generator last ran:
+    //! lets the generator skip its compact/scan/fill pipeline when nothing
+    //! is shifting
+    size_type num_dist_written{0};
+    //!@}
 };
 
 //---------------------------------------------------------------------------//

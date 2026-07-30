@@ -30,6 +30,8 @@ void WavelengthShiftModel::step(CoreParams const& params,
     auto& aux_state
         = get<WlsGeneratorState<MemSpace::native>>(*state.aux(), aux_id_);
 
+    auto* counters
+        = static_cast<CoreStateCounters*>(state.ref().init.counters.data());
     auto execute = make_action_thread_executor(
         params.ptr<MemSpace::native>(),
         state.ptr(),
@@ -37,7 +39,8 @@ void WavelengthShiftModel::step(CoreParams const& params,
         InteractionApplier{
             WavelengthShiftExecutor{this->device_ref(),
                                     aux_state.store.ref(),
-                                    aux_state.counters.buffer_size}});
+                                    aux_state.counters.buffer_size,
+                                    counters}});
     static ActionLauncher<decltype(execute)> const launch_kernel(*this);
     launch_kernel(state, execute);
 }

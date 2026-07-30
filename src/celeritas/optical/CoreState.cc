@@ -158,6 +158,9 @@ void CoreState<M>::reset()
     counters.num_vacancies = this->size();
     sync_put_counters(counters);
 
+    // The device hit counter was just zeroed with the rest
+    this->last_hit_count(0);
+
     // Reset all the track slots to inactive
     fill(TrackStatus::inactive, &this->ref().sim.status);
 

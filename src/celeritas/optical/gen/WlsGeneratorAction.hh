@@ -110,8 +110,8 @@ class WlsGeneratorAction final : public GeneratorBase
     template<MemSpace M>
     void step_impl(CoreParams const&, CoreState<M>&) const;
 
-    void generate(CoreParams const&, CoreStateHost&) const;
-    void generate(CoreParams const&, CoreStateDevice&) const;
+    void generate(CoreParams const&, CoreStateHost&, size_type) const;
+    void generate(CoreParams const&, CoreStateDevice&, size_type) const;
 };
 
 //---------------------------------------------------------------------------//

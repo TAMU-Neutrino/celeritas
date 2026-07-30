@@ -13,6 +13,7 @@
 #include "corecel/sys/ActionInterface.hh"
 #include "celeritas/optical/action/ActionInterface.hh"
 #include "celeritas/phys/GeneratorInterface.hh"
+#include "celeritas/track/CoreStateCounters.hh"
 
 namespace celeritas
 {
@@ -74,6 +75,12 @@ class GeneratorBase : virtual public optical::OpticalStepActionInterface,
     template<MemSpace M>
     inline void update_counters(optical::CoreState<M>&) const;
 
+    // Same, reusing a counter snapshot the caller already synchronized:
+    // saves the second device round trip per generator per iteration
+    template<MemSpace M>
+    inline void
+    update_counters(optical::CoreState<M>&, CoreStateCounters&) const;
+
   private:
     StaticActionData sad_;
     AuxId aux_id_;
@@ -89,9 +96,24 @@ class GeneratorBase : virtual public optical::OpticalStepActionInterface,
 template<MemSpace M>
 void GeneratorBase::update_counters(optical::CoreState<M>& state) const
 {
+    auto counters = state.sync_get_counters();
+    this->update_counters(state, counters);
+}
+
+//---------------------------------------------------------------------------//
+/*!
+ * Update the generator and state counters from a synchronized snapshot.
+ *
+ * The generator kernels do not modify the core state counters, so a snapshot
+ * read at the top of the generator's step is still current here and the
+ * device round trip of a second read can be skipped.
+ */
+template<MemSpace M>
+void GeneratorBase::update_counters(optical::CoreState<M>& state,
+                                    CoreStateCounters& counters) const
+{
     CELER_EXPECT(state.aux());
 
-    auto counters = state.sync_get_counters();
     auto& gen_counters = this->counters(*state.aux());
 
     // Calculate the number of new tracks generated at this step

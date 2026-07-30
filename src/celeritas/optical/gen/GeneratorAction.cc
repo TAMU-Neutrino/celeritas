@@ -208,18 +208,18 @@ void GeneratorAction::step_impl(CoreParams const& params,
             state.stream_id());
     }
 
-    // One read of the counters, reused below: on device each read is a
-    // copy plus a full stream synchronization, and nothing between here and
-    // the generation changes the vacancy count
-    size_type const num_vacancies = state.sync_get_counters().num_vacancies;
-    if (num_vacancies > 0 && counters.num_pending > 0)
+    // One read of the counters, reused below and by the counter update: on
+    // device each read is a copy plus a full stream synchronization, and
+    // nothing between here and the update changes the fields involved
+    auto core_counters = state.sync_get_counters();
+    if (core_counters.num_vacancies > 0 && counters.num_pending > 0)
     {
         // Generate the optical photons from the distribution data
-        this->generate(params, state, num_vacancies);
+        this->generate(params, state, core_counters.num_vacancies);
     }
 
     // Update the generator and optical core state counters
-    this->update_counters(state);
+    this->update_counters(state, core_counters);
 
     // If there are no more tracks to generate, reset the buffer size and
     // number of photons generated

@@ -6,9 +6,11 @@
 //---------------------------------------------------------------------------//
 #pragma once
 
+#include "corecel/math/Atomics.hh"
 #include "celeritas/Types.hh"
 #include "celeritas/optical/CoreTrackView.hh"
 #include "celeritas/optical/DetectorData.hh"
+#include "celeritas/track/CoreStateCounters.hh"
 
 namespace celeritas
 {
@@ -36,6 +38,9 @@ namespace detail
 struct DetectorExecutor
 {
     NativeRef<DetectorStateData> detector_state_;
+    // Global step counters: num_hits counts hits scored this pass so the
+    // action can skip the device-to-host hit copy when there are none
+    CoreStateCounters* counters_{nullptr};
 
     // Copy track hit into the state buffer
     inline CELER_FUNCTION void operator()(CoreTrackView const&) const;
@@ -101,6 +106,9 @@ DetectorExecutor::operator()(CoreTrackView const& track) const
 
     // Kill the track
     sim.status(TrackStatus::killed);
+
+    // Count the scored hit so the action knows a copy is needed
+    atomic_add(&counters_->num_hits, size_type{1});
 }
 
 //---------------------------------------------------------------------------//

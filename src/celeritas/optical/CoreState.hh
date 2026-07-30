@@ -97,6 +97,13 @@ class CoreStateBase : public CoreStateInterface
     //! Optical loop statistics
     CounterAccumStats& accum() { return accum_; }
 
+    //! Cumulative num_hits value already delivered: the detector action
+    //! skips the hit copy when the device count has not moved
+    size_type last_hit_count() const { return last_hit_count_; }
+
+    //! Record the delivered hit count
+    void last_hit_count(size_type n) { last_hit_count_ = n; }
+
     //// AUXILIARY DATA ////
 
     //! Access auxiliary core state data
@@ -117,6 +124,9 @@ class CoreStateBase : public CoreStateInterface
 
     // Auxiliary data owned by the core state
     SPAuxStateVec aux_state_;
+
+    // Hits delivered so far (see num_hits counter)
+    size_type last_hit_count_{0};
 };
 
 //---------------------------------------------------------------------------//

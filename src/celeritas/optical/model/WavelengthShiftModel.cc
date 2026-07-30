@@ -121,6 +121,8 @@ void WavelengthShiftModel::step(CoreParams const& params,
     auto& aux_state
         = get<WlsGeneratorState<MemSpace::native>>(*state.aux(), aux_id_);
 
+    auto* counters
+        = static_cast<CoreStateCounters*>(state.ref().init.counters.data());
     launch_action(
         state,
         make_action_thread_executor(params.ptr<MemSpace::native>(),
@@ -129,7 +131,8 @@ void WavelengthShiftModel::step(CoreParams const& params,
                                     InteractionApplier{WavelengthShiftExecutor{
                                         this->host_ref(),
                                         aux_state.store.ref(),
-                                        aux_state.counters.buffer_size}}));
+                                        aux_state.counters.buffer_size,
+                                        counters}}));
 }
 
 //---------------------------------------------------------------------------//
