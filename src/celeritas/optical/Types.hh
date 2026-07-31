@@ -112,5 +112,23 @@ CELER_CONSTEXPR_FUNCTION int to_signed_offset(LocalDirection d)
 }
 
 //---------------------------------------------------------------------------//
+// EVENT ENCODING IN THE PRIMARY ID (streaming injection)
+//---------------------------------------------------------------------------//
+/*!
+ * How an offloading application packs an event ordinal into \c PrimaryId.
+ *
+ * The low \c event_shift bits hold the application's own track id, the rest
+ * an event ordinal that wraps at \c event_ring. Wavelength-shifted photons
+ * inherit the whole field, so a re-emitted photon still names its event.
+ * Only the event census interprets these; everything else treats the primary
+ * id as opaque. They are defined here so the interpretation lives in one
+ * place rather than being duplicated by each application.
+ */
+//!@{
+inline constexpr unsigned int event_shift = 20;
+inline constexpr unsigned int event_ring = 1u << (32 - event_shift);
+//!@}
+
+//---------------------------------------------------------------------------//
 }  // namespace optical
 }  // namespace celeritas

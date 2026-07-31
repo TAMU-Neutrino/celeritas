@@ -27,6 +27,7 @@
 #include "detail/GeneratorAlgorithms.hh"
 #include "detail/OffloadAlgorithms.hh"
 #include "detail/WlsGeneratorExecutor.hh"
+#include "celeritas/optical/detail/EventCensus.hh"
 
 namespace celeritas
 {
@@ -193,12 +194,56 @@ void WlsGeneratorAction::step_impl(CoreParams const& params,
     fill(buffer[DistRange(DistId(counters.buffer_size),
                           DistId(counters.buffer_size + state.size()))]);
 
+    // Fold the records still waiting to be re-emitted into the event census,
+    // so an event with a queued wavelength-shifted photon is never mistaken
+    // for finished and released while its light is still coming. Contributing
+    // on a non-census iteration is harmless: the value is reset at the start
+    // of each census, so only contributions inside the window are read.
+    if (census_enabled() && counters.buffer_size > 0)
+    {
+        this->census(state, counters.buffer_size);
+    }
+
     // Update the generator and optical core state counters (the kernels
     // above do not touch them, so the snapshot is still current)
     this->update_counters(state, core_counters);
 
     CELER_ENSURE(!counters.buffer_size == !counters.num_pending);
 }
+
+//---------------------------------------------------------------------------//
+/*!
+ * Whether the event census is running.
+ */
+bool WlsGeneratorAction::census_enabled()
+{
+    static bool const enabled
+        = std::getenv("CELER_OPTICAL_EVENT_CENSUS") != nullptr
+          && std::atoi(std::getenv("CELER_OPTICAL_EVENT_CENSUS")) > 0;
+    return enabled;
+}
+
+//---------------------------------------------------------------------------//
+/*!
+ * Fold pending re-emission records into the event census (host).
+ */
+void WlsGeneratorAction::census(CoreStateHost& state,
+                                size_type buffer_size) const
+{
+    CELER_EXPECT(state.aux());
+
+    auto& aux_state = get<WlsGeneratorState<MemSpace::native>>(*state.aux(),
+                                                               this->aux_id());
+    detail::census_wls(state.ref(), aux_state.store.ref(), buffer_size);
+}
+
+//---------------------------------------------------------------------------//
+#if !CELER_USE_DEVICE
+void WlsGeneratorAction::census(CoreStateDevice&, size_type) const
+{
+    CELER_NOT_CONFIGURED("CUDA OR HIP");
+}
+#endif
 
 //---------------------------------------------------------------------------//
 /*!

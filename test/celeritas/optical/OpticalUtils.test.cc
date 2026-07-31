@@ -18,6 +18,7 @@
 #include "corecel/math/Algorithms.hh"
 #include "celeritas/optical/action/detail/TrackInitAlgorithms.hh"
 #include "celeritas/optical/gen/detail/GeneratorAlgorithms.hh"
+#include "celeritas/optical/detail/EventCensus.hh"
 
 #include "celeritas_test.hh"
 
@@ -25,6 +26,79 @@ namespace celeritas
 {
 namespace test
 {
+//---------------------------------------------------------------------------//
+// EVENT CENSUS ARITHMETIC
+//---------------------------------------------------------------------------//
+/*!
+ * The census reduces the smallest live event ordinal RELATIVE to a base,
+ * modulo the ring the ordinal is encoded in. That is what lets a streaming
+ * driver retire events while later ones are still in flight, and it has to
+ * keep ordering across the wrap -- which is the whole reason it is not a
+ * plain minimum.
+ */
+class EventCensusArithmeticTest : public Test
+{
+  protected:
+    using Counters = CoreStateCounters;
+
+    //! Reduce a set of event ordinals the way the census kernels do
+    size_type reduce(size_type base, std::vector<size_type> const& events)
+    {
+        Counters c;
+        c.event_census_base = base;
+        c.min_live_event_rel = optical::event_ring;
+        for (size_type ev : events)
+        {
+            auto primary = id_cast<PrimaryId>(ev << optical::event_shift);
+            optical::detail::census_event(&c, primary);
+        }
+        return c.min_live_event_rel;
+    }
+};
+
+TEST_F(EventCensusArithmeticTest, empty_reads_as_nothing_live)
+{
+    EXPECT_EQ(optical::event_ring, this->reduce(0, {}));
+    EXPECT_EQ(optical::event_ring, this->reduce(1234, {}));
+}
+
+TEST_F(EventCensusArithmeticTest, picks_the_oldest)
+{
+    // Relative to the base, so the answer is an offset from it
+    EXPECT_EQ(0, this->reduce(10, {10, 11, 12}));
+    EXPECT_EQ(1, this->reduce(10, {13, 11, 12}));
+    EXPECT_EQ(5, this->reduce(10, {15}));
+    // Order of contribution must not matter
+    EXPECT_EQ(1, this->reduce(10, {12, 11, 13}));
+    EXPECT_EQ(1, this->reduce(10, {13, 12, 11}));
+}
+
+TEST_F(EventCensusArithmeticTest, orders_correctly_across_the_wrap)
+{
+    // Base near the top of the ring with events that have wrapped past zero:
+    // a plain minimum would call the wrapped ordinals oldest and retire
+    // events whose photons are still in flight.
+    size_type const ring = optical::event_ring;
+    size_type const base = ring - 2;
+    // Events base, base+1, then 0 and 1 (wrapped) -- base is still oldest
+    EXPECT_EQ(0, this->reduce(base, {base, base + 1, 0, 1}));
+    // With base itself retired, the oldest live one is base+1 (offset 1)
+    EXPECT_EQ(1, this->reduce(base, {base + 1, 0, 1}));
+    // Only wrapped events remain: offsets 2 and 3 past the base
+    EXPECT_EQ(2, this->reduce(base, {0, 1}));
+}
+
+TEST_F(EventCensusArithmeticTest, unset_primary_counts_as_event_zero)
+{
+    // A photon with no primary id belongs to no event; treated as ordinal 0
+    // so it can never make an event look retired while it is alive.
+    Counters c;
+    c.event_census_base = 0;
+    c.min_live_event_rel = optical::event_ring;
+    optical::detail::census_event(&c, PrimaryId{});
+    EXPECT_EQ(0, c.min_live_event_rel);
+}
+
 //---------------------------------------------------------------------------//
 template<class T, MemSpace M>
 using StateVal = StateCollection<T, Ownership::value, M>;

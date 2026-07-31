@@ -23,6 +23,7 @@
 #include "CoreParams.hh"
 #include "CoreState.hh"
 #include "SimParams.hh"  // IWYU pragma: keep
+#include "detail/EventCensus.hh"
 
 namespace celeritas
 {
@@ -37,6 +38,13 @@ Transporter::Transporter(Input&& inp) : input_(std::move(inp))
     CELER_EXPECT(input_.params);
 
     actions_ = std::make_shared<ActionGroupsT>(*this->params()->action_reg());
+
+    // Event census cadence. Off unless asked for: it costs a launch over the
+    // live tracks, which only a streaming driver needs.
+    if (char const* s = std::getenv("CELER_OPTICAL_EVENT_CENSUS"))
+    {
+        census_period_ = static_cast<size_type>(std::max(0, std::atoi(s)));
+    }
 }
 
 //---------------------------------------------------------------------------//
@@ -66,7 +74,8 @@ void Transporter::operator()(CoreStateBase& state) const
  */
 template<MemSpace M>
 CoreStateCounters Transporter::step_once_impl(CoreState<M>& state,
-                                              size_type iter_ordinal) const
+                                              size_type iter_ordinal,
+                                              size_type census_base) const
 {
     // Store a pointer to aux data for timing results
     std::vector<double>* accum_time = nullptr;
@@ -94,6 +103,20 @@ CoreStateCounters Transporter::step_once_impl(CoreState<M>& state,
 
     ScopedProfiling profile_this{"step"};
     Stopwatch get_step_time;
+
+    bool const take_census
+        = census_period_ > 0 && (iter_ordinal % census_period_ == 0);
+    if (take_census)
+    {
+        // Open the census window: clear the running minimum and publish the
+        // base the reduction is relative to. Contributions land through the
+        // rest of this iteration -- pending re-emission records from the
+        // generator, live tracks at the end -- and are read below.
+        auto c = state.sync_get_counters();
+        c.min_live_event_rel = event_ring;
+        c.event_census_base = census_base;
+        state.sync_put_counters(c);
+    }
 
     // Gather the live tracks at the front of the thread-to-slot map so
     // that the actions after the pre-step launch over them alone. The
@@ -141,6 +164,14 @@ CoreStateCounters Transporter::step_once_impl(CoreState<M>& state,
         }
     }
 
+    // Close the census window with the live tracks. The generator folded in
+    // its pending re-emission records earlier in this same iteration, so the
+    // minimum now covers every place a photon of a given event can be.
+    if (take_census)
+    {
+        detail::census_tracks(state.ref(), state.active_size());
+    }
+
     // Retrieve the counters updated on the device during the iteration. The
     // step instruments cover this synchronization, as they did when the
     // read lived in the loop.
@@ -165,15 +196,17 @@ CoreStateCounters Transporter::step_once_impl(CoreState<M>& state,
  * Run a single step iteration (streaming driver building block).
  */
 CoreStateCounters
-Transporter::step_once(CoreStateBase& state, size_type iter_ordinal) const
+Transporter::step_once(CoreStateBase& state,
+                       size_type iter_ordinal,
+                       size_type census_base) const
 {
     if (auto* s = dynamic_cast<CoreStateHost*>(&state))
     {
-        return this->step_once_impl(*s, iter_ordinal);
+        return this->step_once_impl(*s, iter_ordinal, census_base);
     }
     else if (auto* s = dynamic_cast<CoreStateDevice*>(&state))
     {
-        return this->step_once_impl(*s, iter_ordinal);
+        return this->step_once_impl(*s, iter_ordinal, census_base);
     }
     CELER_ASSERT_UNREACHABLE();
 }
@@ -202,7 +235,7 @@ void Transporter::transport_impl(CoreState<M>& state) const
     {
         // Run the iteration; the returned counters were synchronized after
         // the last action of the step
-        counters = this->step_once_impl(state, num_step_iters);
+        counters = this->step_once_impl(state, num_step_iters, 0);
         num_steps += counters.num_active;
 
         if (CELER_UNLIKELY(trace_occupancy && num_step_iters < 40))

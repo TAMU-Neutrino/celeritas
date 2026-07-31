@@ -68,7 +68,12 @@ class Transporter
     // ordinal sequences the periodic full compaction pass and must increase
     // by one per call on a given state. Returns the counters synchronized
     // at the end of the iteration.
-    CoreStateCounters step_once(CoreStateBase&, size_type iter_ordinal) const;
+    // census_base is the event ordinal the census reduction is relative to;
+    // a streaming driver moves it forward as it retires events, keeping
+    // every ordinal in flight within one ring of it.
+    CoreStateCounters step_once(CoreStateBase&,
+                                size_type iter_ordinal,
+                                size_type census_base = 0) const;
 
     //! Access the shared params
     SPConstParams const& params() const { return input_.params; }
@@ -90,13 +95,24 @@ class Transporter
     Input input_;
     SPActionGroups actions_;
 
+    // Iterations between event censuses; 0 disables (CELER_OPTICAL_EVENT_CENSUS)
+    size_type census_period_{0};
+
+  public:
+    //! Whether the event census is running
+    bool census_enabled() const { return census_period_ > 0; }
+
+  private:
+
     //// HELPERS ////
 
     template<MemSpace M>
     void transport_impl(CoreState<M>&) const;
 
     template<MemSpace M>
-    CoreStateCounters step_once_impl(CoreState<M>&, size_type iter_ordinal) const;
+    CoreStateCounters step_once_impl(CoreState<M>&,
+                                     size_type iter_ordinal,
+                                     size_type census_base) const;
 };
 
 //---------------------------------------------------------------------------//

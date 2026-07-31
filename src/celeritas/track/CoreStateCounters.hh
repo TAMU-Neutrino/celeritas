@@ -73,6 +73,29 @@ struct CoreStateCounters
     //! is shifting
     size_type num_dist_written{0};
     //!@}
+
+    //!@{
+    //! \name Event census (streaming injection)
+    //
+    // Which events still have photons somewhere in the loop. Without this,
+    // the only completion signal is the whole loop going empty, which under
+    // continuous injection may never happen -- so nothing could ever be
+    // released while the run is in progress.
+    //
+    // The census reduces, over both live tracks and pending wavelength-shift
+    // records, the event ordinal RELATIVE to \c event_census_base, modulo the
+    // encoding ring. Relative because the ordinal is carried inside the
+    // primary id in a field that wraps: differences from a host-chosen base
+    // order correctly as long as fewer than a ring's worth of events are in
+    // flight at once, which backpressure guarantees. The host adds the base
+    // back, and may then retire every event below the result whose photons
+    // have all been generated.
+    //
+    // \c min_live_event_rel is reset to the ring size (meaning "nothing
+    // live") before each census pass.
+    size_type event_census_base{0};
+    size_type min_live_event_rel{0};
+    //!@}
 };
 
 //---------------------------------------------------------------------------//

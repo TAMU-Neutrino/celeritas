@@ -112,6 +112,13 @@ class WlsGeneratorAction final : public GeneratorBase
 
     void generate(CoreParams const&, CoreStateHost&, size_type) const;
     void generate(CoreParams const&, CoreStateDevice&, size_type) const;
+
+    // Whether the event census is running (CELER_OPTICAL_EVENT_CENSUS)
+    static bool census_enabled();
+
+    // Fold pending re-emission records into the event census
+    void census(CoreStateHost&, size_type buffer_size) const;
+    void census(CoreStateDevice&, size_type buffer_size) const;
 };
 
 //---------------------------------------------------------------------------//

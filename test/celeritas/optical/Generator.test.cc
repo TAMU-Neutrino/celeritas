@@ -337,6 +337,75 @@ TEST_F(LArSphereGeneratorTest, offload_append)
     EXPECT_EQ(0, counters.num_pending);
 }
 
+TEST_F(LArSphereGeneratorTest, event_census)
+{
+    // The census must report the smallest event still holding a photon, so a
+    // streaming driver can retire the events below it WITHOUT the loop ever
+    // going empty. Inject two events' photons at once, tagged the way an
+    // offloading application tags them, and step until the loop drains: the
+    // reported minimum must never exceed the smallest event actually still
+    // present, and must reach "nothing live" exactly when the loop empties.
+    setenv("CELER_OPTICAL_EVENT_CENSUS", "1", 1);
+
+    osi_.problem.generator = inp::OpticalDirectGenerator{};
+    osi_.problem.capacity.tracks = 64;
+
+    auto encode = [](size_type event, size_type track) {
+        return id_cast<PrimaryId>((event << optical::event_shift) | track);
+    };
+
+    std::vector<optical::TrackInitializer> inits;
+    for (size_type event : {size_type{3}, size_type{4}})
+    {
+        for (size_type i = 0; i < 96; ++i)
+        {
+            inits.push_back(optical::TrackInitializer{units::MevEnergy{1e-5},
+                                                      Real3{0, 0, 0},
+                                                      Real3{1, 0, 0},
+                                                      Real3{0, 1, 0},
+                                                      0,
+                                                      encode(event, i + 1),
+                                                      ImplVolumeId{0}});
+        }
+    }
+
+    optical::Runner run(std::move(osi_));
+    run.insert(make_span(inits));
+
+    auto const& transport = *run.problem().transporter;
+    ASSERT_TRUE(transport.census_enabled());
+    auto& state = run.state();
+
+    // Events 3 and 4 are in flight; the reduction is relative to 3
+    size_type const census_base = 3;
+
+    size_type iter = 0;
+    size_type min_seen = optical::event_ring;
+    auto counters = state.sync_get_counters();
+    while (counters.num_pending > 0 || counters.num_alive > 0)
+    {
+        counters = transport.step_once(state, iter++, census_base);
+        // Absolute minimum live event: base plus the relative reduction
+        size_type const rel = counters.min_live_event_rel;
+        if (rel < optical::event_ring)
+        {
+            min_seen = std::min(min_seen, rel);
+            // Never claims an event is gone while photons of it remain
+            EXPECT_LE(3 + rel, 4u);
+        }
+        ASSERT_LT(iter, 10000);
+    }
+
+    // While photons were in flight the census saw event 3 (relative 0)
+    EXPECT_EQ(0, min_seen);
+
+    // Drained: one more census reports nothing live
+    transport.step_once(state, iter, census_base);
+    EXPECT_EQ(optical::event_ring, state.sync_get_counters().min_live_event_rel);
+
+    unsetenv("CELER_OPTICAL_EVENT_CENSUS");
+}
+
 TEST_F(DuneGeneratorTest, offload)
 {
     // Generate Cherenkov and scintillation photons
