@@ -6,7 +6,9 @@
 //---------------------------------------------------------------------------//
 #pragma once
 
+#include <deque>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include "corecel/Types.hh"
@@ -143,6 +145,19 @@ class LocalOpticalGenOffload final : public LocalOffloadInterface
 
     // One-shot marker for the reseed-disabled note
     bool reseed_note_logged_{false};
+
+    //// EVENT-CENSUS ACCOUNTING (consumer thread only) ////
+
+    // (event, cumulative photons staged through it), oldest first
+    std::deque<std::pair<long, size_type>> staged_;
+    size_type staged_photons_{0};
+    // Highest event whose photons have all been generated
+    long fully_generated_{-1};
+    // Highest event already published as complete
+    long published_event_{-1};
+    // Reference ordinal for the census reduction: the oldest event not yet
+    // retired, which keeps everything in flight within one ring of it
+    size_type census_base_{0};
 
     //// STREAMING HELPERS ////
 

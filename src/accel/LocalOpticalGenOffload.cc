@@ -42,6 +42,7 @@ struct LocalOpticalGenOffload::Streaming
     struct Burst
     {
         long event{0};
+        size_type photons{0};
         std::vector<DistributionData> records;
     };
 
@@ -397,6 +398,7 @@ void LocalOpticalGenOffload::StageStreaming()
         std::lock_guard<std::mutex> lock{sx.mutex};
         Streaming::Burst burst;
         burst.event = event_ordinal_ < 0 ? 0 : event_ordinal_;
+        burst.photons = num_photons_;
         burst.records = std::move(buffer_);
         sx.staged.push_back(std::move(burst));
     }
@@ -544,6 +546,11 @@ void LocalOpticalGenOffload::ConsumerLoop()
             {
                 generate_->append(state, make_span(b.records));
                 absorbed_event = b.event;
+                // Cumulative photon total at the end of this event, against
+                // which the generator's progress says when the event's
+                // photons have all been created
+                staged_photons_ += b.photons;
+                staged_.push_back({b.event, staged_photons_});
             }
             counters = state.sync_get_counters();
             stall_iters = 0;
@@ -551,7 +558,52 @@ void LocalOpticalGenOffload::ConsumerLoop()
 
         if (counters.num_pending > 0 || counters.num_alive > 0)
         {
-            counters = transport_->step_once(state, iter++);
+            counters = transport_->step_once(state, iter++, census_base_);
+
+            // How far the generator has got: everything up to here has been
+            // turned into tracks, so an event below it can only still be
+            // represented by a live track or a pending re-emission record --
+            // both of which the census sees.
+            if (!staged_.empty())
+            {
+                size_type const made
+                    = generate_->counters(*state.aux()).accum.num_generated;
+                while (!staged_.empty() && staged_.front().second <= made)
+                {
+                    fully_generated_ = staged_.front().first;
+                    staged_.pop_front();
+                }
+            }
+
+            // Retire events the census says hold no photons anywhere. This
+            // is what makes the cursor advance DURING transport: without it
+            // the only completion signal is the loop going empty, which
+            // under continuous injection may never happen, so nothing could
+            // be released until the end of the run.
+            if (transport_->census_enabled()
+                && counters.min_live_event_rel < optical::event_ring)
+            {
+                long const oldest_live
+                    = census_base_
+                      + static_cast<long>(counters.min_live_event_rel);
+                // Every event before the oldest live one is finished, but
+                // only up to what has actually been staged and generated:
+                // an event whose photons have not all been created yet has
+                // nothing live to find.
+                long const done = std::min(oldest_live - 1, fully_generated_);
+                if (done > published_event_)
+                {
+                    published_event_ = done;
+                    std::lock_guard<std::mutex> lock(sx.mutex);
+                    if (done > sx.drained_event)
+                    {
+                        sx.drained_event = done;
+                    }
+                }
+                // Keep the reduction's reference within a ring of everything
+                // in flight
+                census_base_ = published_event_ + 1;
+            }
 
             // Mirror the per-flush statistics of the blocking loop
             state.accum().steps += counters.num_active;
