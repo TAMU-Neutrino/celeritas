@@ -88,6 +88,22 @@ LocalOpticalGenOffload::LocalOpticalGenOffload(SetupOptions const& options,
     if (options.optical)
     {
         streaming_ = options.optical->streaming.enabled;
+#if CELERITAS_CORE_GEO == CELERITAS_CORE_GEO_GEANT4
+        if (streaming_ && !celeritas::device())
+        {
+            // Host transport with the Geant4 navigator cannot run on the
+            // consumer thread: its split-class data and touchable
+            // allocators belong to the worker. Fall back to the blocking
+            // flush rather than failing -- streaming is the default, and a
+            // default has to work on every machine, just not equally fast.
+            CELER_LOG_LOCAL(warning)
+                << "Streaming optical transport is unavailable on the host "
+                   "with the Geant4 geometry: falling back to a synchronous "
+                   "flush. Build with VecGeom or run on a device for the "
+                   "faster path.";
+            streaming_ = false;
+        }
+#endif
         if (streaming_)
         {
             // Keep the user hit callback for producer-side delivery: in
