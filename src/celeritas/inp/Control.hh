@@ -92,6 +92,27 @@ struct CoreStateCapacity : StateCapacity
 
 //---------------------------------------------------------------------------//
 /*!
+ * Drive the optical tracking loop as a continuous consumer.
+ *
+ * With \c enabled, the loop runs on a persistent per-stream thread that
+ * accepts new primaries while it is running, so the drain-out tail of one
+ * event transports the next events' photons instead of idling.
+ *
+ * \c event_census_period is how often (in step iterations) to reduce which
+ * events still hold photons. That is what lets a driver retire an event
+ * while later ones are still in flight; without it the only completion
+ * signal is the loop going empty, which continuous injection may never
+ * allow. Zero disables the census. It costs one launch over the live tracks
+ * per period and nothing per photon.
+ */
+struct OpticalStreaming
+{
+    bool enabled{false};
+    size_type event_census_period{16};
+};
+
+//---------------------------------------------------------------------------//
+/*!
  * Set up per-process state/buffer capacities for the optical tracking loop.
  *
  * \note \c generators was previously named \c buffer_capacity. It is required
@@ -144,6 +165,9 @@ struct Control
 
     //! Per-process state sizes for *optical* tracking loop
     std::optional<OpticalStateCapacity> optical_capacity;
+
+    //! How the optical tracking loop is driven
+    OpticalStreaming optical_streaming;
 
     //! Number of streams
     size_type num_streams{};

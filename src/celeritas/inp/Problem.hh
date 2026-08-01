@@ -94,6 +94,8 @@ struct OpticalProblem
     OpticalTrackingLimits limits;
     //! Per-process state sizes for optical tracking loop
     OpticalStateCapacity capacity;
+    //! How the optical tracking loop is driven
+    OpticalStreaming streaming;
     //! User scoring configuration for optical detectors
     OpticalDetector detectors;
     //! Number of streams

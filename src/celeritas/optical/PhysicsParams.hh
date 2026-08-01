@@ -55,7 +55,8 @@ class PhysicsParams final : public ParamsDataInterface<PhysicsParamsData>
                            SPActionRegistry,
                            SPAuxRegistry,
                            SPGeneratorRegistry,
-                           size_type);
+                           size_type,
+                           size_type census_period = 0);
 
     //! Number of optical models
     inline ModelId::size_type num_models() const { return models_.size(); }

@@ -305,7 +305,8 @@ auto build_optical_params(
         pi.action_reg,
         pi.aux_reg,
         pi.gen_reg,
-        pi.sizes.generators);
+        pi.sizes.generators,
+        p.control.optical_streaming.event_census_period);
     pi.rng = core.rng();
     pi.sim = std::make_shared<optical::SimParams>(p.tracking.optical_limits);
     pi.surface = core.surface();
@@ -865,6 +866,7 @@ problem(inp::OpticalProblem const& p, ImportData const& imported)
         ti.step_times = StepTimes::make_and_insert(params->aux_reg(),
                                                    "optical-step-times");
     }
+    ti.census_period = p.streaming.event_census_period;
     ti.params = std::move(params);
     result.transporter = std::make_shared<optical::Transporter>(std::move(ti));
 

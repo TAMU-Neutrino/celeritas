@@ -85,12 +85,16 @@ LocalOpticalGenOffload::LocalOpticalGenOffload(SetupOptions const& options,
                    << "cannot create local optical offload when Celeritas "
                       "offloading is disabled");
 
-    if (LocalOpticalGenOffload::StreamingEnabled() && options.optical)
+    if (options.optical)
     {
-        // Keep the user hit callback for producer-side delivery: in
-        // streaming mode the detector action routes hits to the consumer's
-        // sink instead of calling it on the transport thread
-        user_hit_callback_ = options.optical->detectors.callback;
+        streaming_ = options.optical->streaming.enabled;
+        if (streaming_)
+        {
+            // Keep the user hit callback for producer-side delivery: in
+            // streaming mode the detector action routes hits to the
+            // consumer's sink instead of calling it on the transport thread
+            user_hit_callback_ = options.optical->detectors.callback;
+        }
     }
 
     // Save a pointer to the optical transporter
@@ -158,7 +162,7 @@ void LocalOpticalGenOffload::InitializeEvent(int id)
 
     event_id_ = id_cast<UniqueEventId>(id);
 
-    if (LocalOpticalGenOffload::StreamingEnabled())
+    if (this->StreamingEnabled())
     {
         // The caller supplies a monotonic event ordinal (under Geant4 MT
         // each worker sees an increasing subset of a global sequence); it
@@ -216,7 +220,7 @@ void LocalOpticalGenOffload::Push(
 
     if (num_photons_ >= auto_flush_)
     {
-        if (LocalOpticalGenOffload::StreamingEnabled())
+        if (this->StreamingEnabled())
         {
             // Watermark pressure: hand the records over without blocking
             this->StageStreaming();
@@ -236,7 +240,7 @@ void LocalOpticalGenOffload::Flush()
 {
     CELER_EXPECT(*this);
 
-    if (LocalOpticalGenOffload::StreamingEnabled())
+    if (this->StreamingEnabled())
     {
         // Barrier with unchanged semantics: everything staged (including
         // the tail of the buffer) is transported and every hit is
@@ -356,17 +360,6 @@ void LocalOpticalGenOffload::Finalize()
 
 //---------------------------------------------------------------------------//
 // STREAMING MODE
-//---------------------------------------------------------------------------//
-/*!
- * Whether streaming injection is active.
- */
-bool LocalOpticalGenOffload::StreamingEnabled()
-{
-    static bool const enabled
-        = std::getenv("CELER_OPTICAL_STREAMING") != nullptr;
-    return enabled;
-}
-
 //---------------------------------------------------------------------------//
 /*!
  * Hand the buffered records to the consumer thread and return immediately.

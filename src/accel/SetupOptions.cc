@@ -124,6 +124,7 @@ void ProblemSetup::operator()(inp::Problem& p) const
     if (so.optical)
     {
         p.control.optical_capacity = so.optical->capacity;
+        p.control.optical_streaming = so.optical->streaming;
         p.tracking.optical_limits = so.optical->limits;
         p.scoring.optical_detector = so.optical->detectors;
     }
@@ -247,6 +248,7 @@ void OpticalProblemSetup::operator()(inp::OpticalProblem& p) const
     }();
 
     CELER_ASSERT(so.optical);
+    p.streaming = so.optical->streaming;
     p.generator = so.optical->generator;
     p.capacity = so.optical->capacity;
     p.detectors = so.optical->detectors;

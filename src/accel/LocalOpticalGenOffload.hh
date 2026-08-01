@@ -93,8 +93,8 @@ class LocalOpticalGenOffload final : public LocalOffloadInterface
 
     //// STREAMING MODE ////
 
-    // Whether streaming injection is active (CELER_OPTICAL_STREAMING)
-    static bool StreamingEnabled();
+    //! Whether streaming injection is active (see OpticalSetupOptions)
+    bool StreamingEnabled() const { return streaming_; }
 
     // Hand the buffered records to the consumer thread, tagged with the
     // current event ordinal, and return immediately
@@ -137,6 +137,9 @@ class LocalOpticalGenOffload final : public LocalOffloadInterface
 
     // User hit callback, invoked from PumpStreaming on the producer thread
     HitCallbackFunc user_hit_callback_;
+
+    // Set from OpticalSetupOptions::streaming at construction
+    bool streaming_{false};
 
     // Monotonic event ordinal supplied by InitializeEvent, tagging staged
     // bursts (the caller's coordinates; under Geant4 MT each worker sees

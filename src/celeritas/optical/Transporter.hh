@@ -54,6 +54,8 @@ class Transporter
         SPConstParams params;
         SPActionTimes action_times;  //!< Optional
         SPStepTimes step_times;  //!< Optional
+        //! Iterations between event censuses; 0 disables
+        size_type census_period{0};
     };
 
   public:
@@ -95,12 +97,9 @@ class Transporter
     Input input_;
     SPActionGroups actions_;
 
-    // Iterations between event censuses; 0 disables (CELER_OPTICAL_EVENT_CENSUS)
-    size_type census_period_{0};
-
   public:
     //! Whether the event census is running
-    bool census_enabled() const { return census_period_ > 0; }
+    bool census_enabled() const { return input_.census_period > 0; }
 
   private:
 

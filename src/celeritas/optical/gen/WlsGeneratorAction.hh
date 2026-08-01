@@ -71,6 +71,8 @@ class WlsGeneratorAction final : public GeneratorBase
   public:
     struct Input
     {
+        //! Iterations between event censuses; 0 disables
+        size_type census_period{0};
         ActionId action_id;
         AuxId aux_id;
         GeneratorId gen_id;
@@ -104,6 +106,7 @@ class WlsGeneratorAction final : public GeneratorBase
     SPConstWavelengthShiftModel wls_;
     SPConstWavelengthShiftModel wls2_;
     size_type capacity_;
+    size_type census_period_{0};
 
     //// HELPER FUNCTIONS ////
 
@@ -113,8 +116,8 @@ class WlsGeneratorAction final : public GeneratorBase
     void generate(CoreParams const&, CoreStateHost&, size_type) const;
     void generate(CoreParams const&, CoreStateDevice&, size_type) const;
 
-    // Whether the event census is running (CELER_OPTICAL_EVENT_CENSUS)
-    static bool census_enabled();
+    //! Whether the event census is running
+    bool census_enabled() const { return census_period_ > 0; }
 
     // Fold pending re-emission records into the event census
     void census(CoreStateHost&, size_type buffer_size) const;

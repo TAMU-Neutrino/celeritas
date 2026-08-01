@@ -131,6 +131,8 @@ struct OpticalSetupOptions
     inp::OpticalTrackingLimits limits;
     //! Callback for optical photon hits
     inp::OpticalDetector detectors;
+    //! How the optical loop is driven (continuous consumer, event census)
+    inp::OpticalStreaming streaming;
 };
 
 //---------------------------------------------------------------------------//

@@ -67,6 +67,7 @@ WlsGeneratorAction::WlsGeneratorAction(Input&& input)
     , wls_(std::move(input.wls))
     , wls2_(std::move(input.wls2))
     , capacity_(input.capacity)
+    , census_period_(input.census_period)
 {
     CELER_EXPECT(capacity_ > 0);
     CELER_EXPECT(wls_ || wls2_);
@@ -199,7 +200,7 @@ void WlsGeneratorAction::step_impl(CoreParams const& params,
     // for finished and released while its light is still coming. Contributing
     // on a non-census iteration is harmless: the value is reset at the start
     // of each census, so only contributions inside the window are read.
-    if (census_enabled() && counters.buffer_size > 0)
+    if (this->census_enabled() && counters.buffer_size > 0)
     {
         this->census(state, counters.buffer_size);
     }
@@ -209,18 +210,6 @@ void WlsGeneratorAction::step_impl(CoreParams const& params,
     this->update_counters(state, core_counters);
 
     CELER_ENSURE(!counters.buffer_size == !counters.num_pending);
-}
-
-//---------------------------------------------------------------------------//
-/*!
- * Whether the event census is running.
- */
-bool WlsGeneratorAction::census_enabled()
-{
-    static bool const enabled
-        = std::getenv("CELER_OPTICAL_EVENT_CENSUS") != nullptr
-          && std::atoi(std::getenv("CELER_OPTICAL_EVENT_CENSUS")) > 0;
-    return enabled;
 }
 
 //---------------------------------------------------------------------------//

@@ -38,13 +38,6 @@ Transporter::Transporter(Input&& inp) : input_(std::move(inp))
     CELER_EXPECT(input_.params);
 
     actions_ = std::make_shared<ActionGroupsT>(*this->params()->action_reg());
-
-    // Event census cadence. Off unless asked for: it costs a launch over the
-    // live tracks, which only a streaming driver needs.
-    if (char const* s = std::getenv("CELER_OPTICAL_EVENT_CENSUS"))
-    {
-        census_period_ = static_cast<size_type>(std::max(0, std::atoi(s)));
-    }
 }
 
 //---------------------------------------------------------------------------//
@@ -105,7 +98,7 @@ CoreStateCounters Transporter::step_once_impl(CoreState<M>& state,
     Stopwatch get_step_time;
 
     bool const take_census
-        = census_period_ > 0 && (iter_ordinal % census_period_ == 0);
+        = input_.census_period > 0 && (iter_ordinal % input_.census_period == 0);
     if (take_census)
     {
         // Open the census window: clear the running minimum and publish the

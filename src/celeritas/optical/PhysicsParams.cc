@@ -42,7 +42,8 @@ PhysicsParams::PhysicsParams(inp::OpticalBulkPhysics const& input,
                              SPActionRegistry action_reg,
                              SPAuxRegistry aux_reg,
                              SPGeneratorRegistry gen_reg,
-                             size_type gen_capacity)
+                             size_type gen_capacity,
+                             size_type census_period)
 {
     CELER_EXPECT(materials);
     CELER_EXPECT(core_materials);
