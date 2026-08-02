@@ -23,8 +23,9 @@ struct CensusTracksExecutor
 
     CELER_FUNCTION void operator()(ThreadId tid) const
     {
-        TrackSlotId slot{state.track_slots[ItemId<TrackSlotId::size_type>(
-            tid.unchecked_get())]};
+        // track_slots is a ThreadItems collection: it is indexed by the
+        // thread, not by an item id, exactly as TrackSlotExecutor does it
+        TrackSlotId slot{state.track_slots[tid]};
         if (!is_track_valid(state.sim.status[slot]))
         {
             return;
