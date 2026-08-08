@@ -13,11 +13,11 @@
 #include "celeritas/optical/CoreState.hh"
 #include "celeritas/optical/action/ActionLauncher.device.hh"
 #include "celeritas/optical/action/TrackSlotExecutor.hh"
+#include "celeritas/optical/detail/EventCensus.hh"
 #include "celeritas/optical/model/WavelengthShiftModel.hh"
 
 #include "WavelengthShiftGenerator.hh"
 
-#include "detail/EventCensus.hh"
 #include "detail/WlsGeneratorExecutor.hh"
 
 namespace celeritas
