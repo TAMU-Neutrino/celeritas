@@ -17,6 +17,7 @@
 
 #include "WavelengthShiftGenerator.hh"
 
+#include "detail/EventCensus.hh"
 #include "detail/WlsGeneratorExecutor.hh"
 
 namespace celeritas
@@ -50,6 +51,27 @@ void WlsGeneratorAction::generate(CoreParams const& params,
         aux_state.counters.buffer_size};
     static ActionLauncher<decltype(execute)> const launch(*this);
     launch(num_gen, state.stream_id(), execute);
+}
+
+//---------------------------------------------------------------------------//
+/*!
+ * Fold pending re-emission records into the event census (device).
+ *
+ * The host overload lives in the .cc, and the .cc also carries a
+ * not-configured stub for this one -- but only under !CELER_USE_DEVICE. With
+ * CUDA on, that stub is compiled out and this is the only definition, so
+ * without it libceleritas carries an undefined symbol. A shared library links
+ * anyway; the failure surfaces later, when something links an executable
+ * against it.
+ */
+void WlsGeneratorAction::census(CoreStateDevice& state,
+                                size_type buffer_size) const
+{
+    CELER_EXPECT(state.aux());
+
+    auto& aux_state = get<WlsGeneratorState<MemSpace::native>>(*state.aux(),
+                                                               this->aux_id());
+    detail::census_wls(state.ref(), aux_state.store.ref(), buffer_size);
 }
 
 //---------------------------------------------------------------------------//
