@@ -23,15 +23,9 @@ struct CensusTracksExecutor
 
     CELER_FUNCTION void operator()(ThreadId tid) const
     {
-        // track_slots is a ThreadItems collection, so it hands out a span
-        // rather than indexing by ThreadId directly -- the same two-step the
-        // host implementation uses. Indexing it with the thread id compiles
-        // nowhere, and this file only ever builds with CUDA, which is why it
-        // survived until a device build ran.
-        auto const slots
-            = state.track_slots[AllItems<TrackSlotId::size_type,
-                                         MemSpace::device>{}];
-        TrackSlotId slot{slots[tid.unchecked_get()]};
+        // track_slots is a ThreadItems collection: it is indexed by the
+        // thread, not by an item id, exactly as TrackSlotExecutor does it
+        TrackSlotId slot{state.track_slots[tid]};
         if (!is_track_valid(state.sim.status[slot]))
         {
             return;
