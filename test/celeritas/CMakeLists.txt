@@ -470,6 +470,9 @@ celeritas_add_standalone_tests(optical/Generator LArSphereGeneratorTest offload_
 celeritas_add_standalone_tests(optical/Generator LArSphereGeneratorTest event_census)
 celeritas_add_standalone_tests(optical/Generator DuneGeneratorTest offload)
 celeritas_add_standalone_tests(optical/Generator WlsGeneratorTest primary)
+celeritas_add_standalone_tests(optical/Generator WlsGeneratorTest census_wls_records)
+celeritas_add_standalone_tests(optical/Generator WlsGeneratorTest tail_record_not_dropped)
+celeritas_add_standalone_tests(optical/Generator TransportableWork predicate)
 celeritas_add_standalone_tests(optical/Detector DetectorTest simple)
 celeritas_add_standalone_tests(optical/Detector DetectorTest stress)
 

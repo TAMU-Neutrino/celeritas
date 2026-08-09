@@ -10,6 +10,7 @@
 
 #include "corecel/Types.hh"
 #include "corecel/cont/Range.hh"
+#include "corecel/data/Copier.hh"
 #include "corecel/random/distribution/PoissonDistribution.hh"
 #include "geocel/UnitUtils.hh"
 #include "celeritas/Quantities.hh"
@@ -17,12 +18,14 @@
 #include "celeritas/Units.hh"
 #include "celeritas/inp/StandaloneInput.hh"
 #include "celeritas/optical/CoreParams.hh"
+#include "celeritas/optical/CoreState.hh"
 #include "celeritas/optical/Runner.hh"
 #include "celeritas/optical/Transporter.hh"
 #include "celeritas/optical/WavelengthShiftData.hh"
 #include "celeritas/optical/gen/GeneratorData.hh"
 #include "celeritas/optical/gen/WlsGeneratorAction.hh"
 #include "celeritas/phys/GeneratorRegistry.hh"
+#include "celeritas/track/CoreStateCounters.hh"
 
 #include "celeritas_test.hh"
 
@@ -529,6 +532,25 @@ TEST_F(WlsGeneratorTest, primary)
 }
 
 //---------------------------------------------------------------------------//
+TEST(TransportableWork, predicate)
+{
+    // The blocking loop and the streaming consumer share this predicate: a
+    // freshly stored distribution must count as work even when nothing is
+    // pending or alive, because it reaches num_pending only on the
+    // generator's next pass.
+    CoreStateCounters c;
+    EXPECT_FALSE(has_transportable_work(c));
+    c.num_pending = 1;
+    EXPECT_TRUE(has_transportable_work(c));
+    c = {};
+    c.num_alive = 1;
+    EXPECT_TRUE(has_transportable_work(c));
+    c = {};
+    c.num_dist_written = 1;
+    EXPECT_TRUE(has_transportable_work(c));
+}
+
+//---------------------------------------------------------------------------//
 // Locate the WLS generator action in a runner's registry
 std::shared_ptr<optical::WlsGeneratorAction const>
 find_wls_action(optical::Runner const& run)
@@ -562,6 +584,40 @@ make_wls_record(size_type event, size_type num_photons)
     return dist;
 }
 
+// Stage host records into the WLS buffer of a state in memspace M. This
+// test file compiles as host code, where MemSpace::native is always host,
+// so the state's actual memspace must be dispatched at run time and the
+// records moved with the matching Copier.
+template<MemSpace M>
+void inject_wls_records(optical::CoreState<M>& state,
+                        AuxId aux_id,
+                        Span<optical::WlsDistributionData const> records)
+{
+    using DistId = ItemId<optical::WlsDistributionData>;
+    using DistRange = ItemRange<optical::WlsDistributionData>;
+    auto& aux_state = get<optical::WlsGeneratorState<M>>(*state.aux(), aux_id);
+    Copier<optical::WlsDistributionData, M> copy_records{
+        aux_state.store.ref().distributions[DistRange(
+            DistId{0}, DistId{records.size()})],
+        state.stream_id()};
+    copy_records(MemSpace::host, records);
+}
+
+void inject_wls_records(optical::CoreStateBase& state,
+                        AuxId aux_id,
+                        Span<optical::WlsDistributionData const> records)
+{
+    if (auto* s = dynamic_cast<optical::CoreState<MemSpace::host>*>(&state))
+    {
+        return inject_wls_records(*s, aux_id, records);
+    }
+    if (auto* s = dynamic_cast<optical::CoreState<MemSpace::device>*>(&state))
+    {
+        return inject_wls_records(*s, aux_id, records);
+    }
+    CELER_ASSERT_UNREACHABLE();
+}
+
 TEST_F(WlsGeneratorTest, census_wls_records)
 {
     // A buffered re-emission record must hold its event in the census even
@@ -586,22 +642,22 @@ TEST_F(WlsGeneratorTest, census_wls_records)
     auto wls = find_wls_action(run);
     ASSERT_TRUE(wls);
 
-    using DistId = ItemId<optical::WlsDistributionData>;
-    auto& aux_state = get<optical::WlsGeneratorState<MemSpace::native>>(
-        *state.aux(), wls->aux_id());
-    auto& buffer = aux_state.store.ref().distributions;
-    buffer[DistId{0}] = make_wls_record(4, 74);
-    buffer[DistId{1}] = make_wls_record(3, 1);
+    std::vector<optical::WlsDistributionData> const records{
+        make_wls_record(4, 74), make_wls_record(3, 1)};
+    inject_wls_records(state, wls->aux_id(), make_span(records));
 
     auto seed = state.sync_get_counters();
     seed.num_dist_written = 2;
     state.sync_put_counters(seed);
 
     // One census iteration: the big record fills every slot with event-4
-    // photons (some may convert again within the iteration); the event-3
-    // record stays buffered because the slots were exhausted before its turn
+    // photons (which may shift again or die within the same iteration, so
+    // num_alive is not asserted). Generation consumes exactly the vacancy
+    // snapshot, 64 of 75 pending photons, and transport touches neither
+    // count, so the leftover is stable: 10 of the event-4 record plus the
+    // whole event-3 record, which the slots were exhausted before reaching.
     auto counters = transport.step_once(state, 0, /* census_base = */ 3);
-    EXPECT_GT(counters.num_alive + counters.num_pending, 0);
+    EXPECT_EQ(11, counters.num_pending);
 
     // The census must still cover event 3 (relative 0), not only the event-4
     // tracks and records (relative 1)
@@ -626,10 +682,9 @@ TEST_F(WlsGeneratorTest, tail_record_not_dropped)
     auto wls = find_wls_action(run);
     ASSERT_TRUE(wls);
 
-    using DistId = ItemId<optical::WlsDistributionData>;
-    auto& aux_state = get<optical::WlsGeneratorState<MemSpace::native>>(
-        *state.aux(), wls->aux_id());
-    aux_state.store.ref().distributions[DistId{0}] = make_wls_record(3, 1);
+    std::vector<optical::WlsDistributionData> const records{
+        make_wls_record(3, 1)};
+    inject_wls_records(state, wls->aux_id(), make_span(records));
 
     auto seed = state.sync_get_counters();
     EXPECT_EQ(0, seed.num_alive);
