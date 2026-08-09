@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "corecel/Types.hh"
+#include "corecel/cont/Range.hh"
 #include "corecel/random/distribution/PoissonDistribution.hh"
 #include "geocel/UnitUtils.hh"
 #include "celeritas/Quantities.hh"
@@ -17,7 +18,10 @@
 #include "celeritas/inp/StandaloneInput.hh"
 #include "celeritas/optical/CoreParams.hh"
 #include "celeritas/optical/Runner.hh"
+#include "celeritas/optical/Transporter.hh"
+#include "celeritas/optical/WavelengthShiftData.hh"
 #include "celeritas/optical/gen/GeneratorData.hh"
+#include "celeritas/optical/gen/WlsGeneratorAction.hh"
 #include "celeritas/phys/GeneratorRegistry.hh"
 
 #include "celeritas_test.hh"
@@ -522,6 +526,127 @@ TEST_F(WlsGeneratorTest, primary)
         "wls2",
     };
     EXPECT_VEC_EQ(expected_labels, labels);
+}
+
+//---------------------------------------------------------------------------//
+// Locate the WLS generator action in a runner's registry
+std::shared_ptr<optical::WlsGeneratorAction const>
+find_wls_action(optical::Runner const& run)
+{
+    auto const& gen_reg = *run.params()->gen_reg();
+    for (auto gid : range(GeneratorId{gen_reg.size()}))
+    {
+        if (auto wls = std::dynamic_pointer_cast<
+                optical::WlsGeneratorAction const>(gen_reg.at(gid)))
+        {
+            return wls;
+        }
+    }
+    return nullptr;
+}
+
+// Build a re-emission record the way the WLS interaction executor would
+optical::WlsDistributionData
+make_wls_record(size_type event, size_type num_photons)
+{
+    optical::WlsDistributionData dist;
+    dist.type = GeneratorType::wls;
+    dist.num_photons = num_photons;
+    dist.energy = units::MevEnergy{9.5e-6};
+    dist.time = 0;
+    dist.position = Real3{0, 0, 0};
+    dist.primary
+        = id_cast<PrimaryId>((event << optical::event_shift) | size_type{1});
+    dist.material = OptMatId{0};
+    CELER_ASSERT(dist);
+    return dist;
+}
+
+TEST_F(WlsGeneratorTest, census_wls_records)
+{
+    // A buffered re-emission record must hold its event in the census even
+    // when no live track of that event remains. Two records go in by hand: a
+    // 74-photon event-4 record first, whose generation exhausts all 64 track
+    // slots, then a one-photon event-3 record that therefore cannot generate
+    // this iteration. Event 3 then exists ONLY as buffered data: without the
+    // generator's census fold the reduction sees just the event-4 tracks and
+    // a streaming driver would retire event 3 while its light is still
+    // queued.
+    osi_.geant_setup.wavelength_shifting.emplace();
+    osi_.geant_setup.wavelength_shifting2.emplace();
+    osi_.problem.generator = inp::OpticalDirectGenerator{};
+    osi_.problem.capacity.tracks = 64;
+    osi_.problem.streaming.event_census_period = 1;
+
+    optical::Runner run(std::move(osi_));
+    auto const& transport = *run.problem().transporter;
+    ASSERT_TRUE(transport.census_enabled());
+    auto& state = run.state();
+
+    auto wls = find_wls_action(run);
+    ASSERT_TRUE(wls);
+
+    using DistId = ItemId<optical::WlsDistributionData>;
+    auto& aux_state = get<optical::WlsGeneratorState<MemSpace::native>>(
+        *state.aux(), wls->aux_id());
+    auto& buffer = aux_state.store.ref().distributions;
+    buffer[DistId{0}] = make_wls_record(4, 74);
+    buffer[DistId{1}] = make_wls_record(3, 1);
+
+    auto seed = state.sync_get_counters();
+    seed.num_dist_written = 2;
+    state.sync_put_counters(seed);
+
+    // One census iteration: the big record fills every slot with event-4
+    // photons (some may convert again within the iteration); the event-3
+    // record stays buffered because the slots were exhausted before its turn
+    auto counters = transport.step_once(state, 0, /* census_base = */ 3);
+    EXPECT_GT(counters.num_alive + counters.num_pending, 0);
+
+    // The census must still cover event 3 (relative 0), not only the event-4
+    // tracks and records (relative 1)
+    EXPECT_EQ(0, counters.min_live_event_rel);
+}
+
+TEST_F(WlsGeneratorTest, tail_record_not_dropped)
+{
+    // A record written by the last live track in its final iteration is in
+    // neither num_pending nor num_alive at the end of that iteration; only
+    // num_dist_written knows about it. The blocking loop must run one more
+    // pass rather than exit with the photon still queued.
+    osi_.geant_setup.wavelength_shifting.emplace();
+    osi_.geant_setup.wavelength_shifting2.emplace();
+    osi_.problem.generator = inp::OpticalDirectGenerator{};
+    osi_.problem.capacity.tracks = 64;
+
+    optical::Runner run(std::move(osi_));
+    auto const& transport = *run.problem().transporter;
+    auto& state = run.state();
+
+    auto wls = find_wls_action(run);
+    ASSERT_TRUE(wls);
+
+    using DistId = ItemId<optical::WlsDistributionData>;
+    auto& aux_state = get<optical::WlsGeneratorState<MemSpace::native>>(
+        *state.aux(), wls->aux_id());
+    aux_state.store.ref().distributions[DistId{0}] = make_wls_record(3, 1);
+
+    auto seed = state.sync_get_counters();
+    EXPECT_EQ(0, seed.num_alive);
+    EXPECT_EQ(0, seed.num_pending);
+    seed.num_dist_written = 1;
+    state.sync_put_counters(seed);
+
+    // The blocking transport must find and track the queued photon (which
+    // may itself shift again and re-emit, so at least one generation)
+    transport(state);
+
+    auto const& accum = wls->counters(*state.aux()).accum;
+    EXPECT_GE(accum.num_generated, 1);
+    auto counters = state.sync_get_counters();
+    EXPECT_EQ(0, counters.num_alive);
+    EXPECT_EQ(0, counters.num_pending);
+    EXPECT_EQ(0, counters.num_dist_written);
 }
 
 //---------------------------------------------------------------------------//
