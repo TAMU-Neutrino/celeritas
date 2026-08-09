@@ -194,6 +194,7 @@ endif()
 
 if(CELERITAS_USE_CUDA OR CELERITAS_USE_HIP)
   list(APPEND SOURCES
+    optical/action/detail/DetectorAlgorithms.cu
     optical/detail/Filler.cu
     optical/detail/EventCensus.cu
     optical/detail/PartitionTracks.cu

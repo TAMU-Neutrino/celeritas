@@ -177,8 +177,14 @@ CoreParams::CoreParams(Input&& input) : input_(std::move(input))
     // TODO: Is there a better place to build this?
     if (input_.optical_detector)
     {
-        input_.action_reg->insert(std::make_shared<DetectorAction>(
-            input_.action_reg->next_id(), input_.optical_detector.callback));
+        // Both an action and an aux params interface: its per-stream
+        // delivery buffers live in aux state
+        auto detector_action = std::make_shared<DetectorAction>(
+            input_.action_reg->next_id(),
+            input_.aux_reg->next_id(),
+            input_.optical_detector.callback);
+        input_.action_reg->insert(detector_action);
+        input_.aux_reg->insert(detector_action);
     }
 
     // Save maximum number of streams
