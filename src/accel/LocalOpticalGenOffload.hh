@@ -162,6 +162,14 @@ class LocalOpticalGenOffload final : public LocalOffloadInterface
     // retired, which keeps everything in flight within one ring of it
     size_type census_base_{0};
 
+    // Drain accounting: how many staged bursts each swap of the staging
+    // vector absorbed together. This -- not the producer's staging count
+    // -- is what sizes a fused multi-burst append: every absorbed burst
+    // is one append with its own counter round trip today.
+    size_type absorb_drains_{0};
+    size_type absorb_bursts_{0};
+    size_type absorb_max_{0};
+
     //// STREAMING HELPERS ////
 
     void StartConsumer();

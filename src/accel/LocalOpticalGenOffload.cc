@@ -357,7 +357,10 @@ void LocalOpticalGenOffload::Finalize()
                           << " step iterations)"
                           << " from " << gen.accum.num_generated
                           << " optical photons generated from "
-                          << gen.accum.buffer_size << " distributions";
+                          << gen.accum.buffer_size << " distributions"
+                          << "; absorbed " << absorb_bursts_
+                          << " bursts over " << absorb_drains_
+                          << " drains (max " << absorb_max_ << ")";
 
     if (!gen.counters.empty())
     {
@@ -551,6 +554,12 @@ void LocalOpticalGenOffload::ConsumerLoop()
         }
         if (!bursts.empty())
         {
+            ++absorb_drains_;
+            absorb_bursts_ += bursts.size();
+            if (bursts.size() > absorb_max_)
+            {
+                absorb_max_ = bursts.size();
+            }
             for (auto& b : bursts)
             {
                 generate_->append(state, make_span(b.records));
