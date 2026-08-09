@@ -67,7 +67,8 @@ PhysicsParams::PhysicsParams(inp::OpticalBulkPhysics const& input,
                                      *action_reg,
                                      *aux_reg,
                                      *gen_reg,
-                                     gen_capacity);
+                                     gen_capacity,
+                                     census_period);
     }
 
     // Construct data
@@ -96,7 +97,8 @@ auto PhysicsParams::build_models(inp::OpticalBulkPhysics const& input,
                                  ActionRegistry& action_reg,
                                  AuxParamsRegistry& aux_reg,
                                  GeneratorRegistry& gen_reg,
-                                 size_type gen_capacity) const -> VecModels
+                                 size_type gen_capacity,
+                                 size_type census_period) const -> VecModels
 {
     VecModels models;
     if (input.absorption)
@@ -123,6 +125,7 @@ auto PhysicsParams::build_models(inp::OpticalBulkPhysics const& input,
         gen_inp.aux_id = aux_reg.next_id();
         gen_inp.gen_id = gen_reg.next_id();
         gen_inp.capacity = gen_capacity;
+        gen_inp.census_period = census_period;
 
         if (input.wls)
         {

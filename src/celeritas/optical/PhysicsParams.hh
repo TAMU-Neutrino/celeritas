@@ -92,7 +92,8 @@ class PhysicsParams final : public ParamsDataInterface<PhysicsParamsData>
                            ActionRegistry&,
                            AuxParamsRegistry&,
                            GeneratorRegistry&,
-                           size_type) const;
+                           size_type gen_capacity,
+                           size_type census_period) const;
     void build_mfps(MaterialParams const& mats, HostValue& data) const;
     //!@}
 };

@@ -371,7 +371,8 @@ auto build_optical_params(inp::OpticalProblem const& p,
         pi.action_reg,
         pi.aux_reg,
         pi.gen_reg,
-        pi.sizes.generators);
+        pi.sizes.generators,
+        p.streaming.event_census_period);
     pi.rng = std::make_shared<RngParams>(p.seed);
     pi.sim = std::make_shared<optical::SimParams>(p.limits);
     pi.surface = std::move(loaded_model.surface);
