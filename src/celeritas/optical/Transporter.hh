@@ -101,6 +101,9 @@ class Transporter
     //! Whether the event census is running
     bool census_enabled() const { return input_.census_period > 0; }
 
+    //! Iterations between event censuses
+    size_type census_period() const { return input_.census_period; }
+
   private:
 
     //// HELPERS ////

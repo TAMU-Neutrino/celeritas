@@ -223,8 +223,12 @@ void Transporter::transport_impl(CoreState<M>& state) const
     static bool const trace_occupancy
         = std::getenv("CELER_DEBUG_OCCUPANCY") != nullptr;
 
-    // Loop while photons are yet to be tracked
-    while (counters.num_pending > 0 || counters.num_alive > 0)
+    // Loop while photons are yet to be tracked. A distribution written by
+    // the last live track in its final iteration is in neither count -- the
+    // generator only folds it into num_pending on the next pass -- so the
+    // fresh-record flag must also hold the loop open.
+    while (counters.num_pending > 0 || counters.num_alive > 0
+           || counters.num_dist_written > 0)
     {
         // Run the iteration; the returned counters were synchronized after
         // the last action of the step

@@ -565,7 +565,8 @@ void LocalOpticalGenOffload::ConsumerLoop()
             stall_iters = 0;
         }
 
-        if (counters.num_pending > 0 || counters.num_alive > 0)
+        if (counters.num_pending > 0 || counters.num_alive > 0
+            || counters.num_dist_written > 0)
         {
             counters = transport_->step_once(state, iter++, census_base_);
 
@@ -589,7 +590,20 @@ void LocalOpticalGenOffload::ConsumerLoop()
             // the only completion signal is the loop going empty, which
             // under continuous injection may never happen, so nothing could
             // be released until the end of the run.
-            if (transport_->census_enabled()
+            //
+            // Only THIS iteration's census may be acted on, and only when no
+            // distribution was written during it. A record stored mid-census
+            // by a parent that died in the same iteration is in neither the
+            // generator's fold (which ran before the record existed) nor the
+            // live-track close (the parent is dead). And between censuses the
+            // fully-generated cursor keeps advancing, so a stale minimum
+            // could licence retiring an event whose tracks -- and their
+            // re-emission records -- only came into existence after that
+            // census closed. Waiting costs at most one census period.
+            bool const census_fresh = transport_->census_enabled()
+                && ((iter - 1) % transport_->census_period() == 0)
+                && counters.num_dist_written == 0;
+            if (census_fresh
                 && counters.min_live_event_rel < optical::event_ring)
             {
                 long const oldest_live
