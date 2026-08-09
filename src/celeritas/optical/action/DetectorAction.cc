@@ -71,7 +71,13 @@ void DetectorAction::step(CoreParams const& params, CoreStateHost& state) const
         params.ptr<MemSpace::native>(),
         state.ptr(),
         detail::DetectorExecutor{state.ref().detectors, counters}};
-    launch_action(state, execute);
+    // EVERY track slot, not the compacted active prefix: the executor
+    // writes hits through the track-slot indirection, so a compacted
+    // launch's physical slots are scattered and slots it skips would keep
+    // stale hits for the full-buffer filter below to re-deliver. Running
+    // over the whole permutation visits each physical slot exactly once
+    // and clears the ones without hits.
+    launch_action(state.size(), execute);
 
     // Skip the hit sweep when this pass scored nothing: the cumulative hit
     // counter has not moved since the last delivery

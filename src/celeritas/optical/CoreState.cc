@@ -49,6 +49,11 @@ CoreState<M>::CoreState(
     counters.num_vacancies = num_track_slots;
     this->sync_put_counters(counters);
 
+    // Device collection storage is uninitialized: a hit-buffer reader
+    // that ranges past what a kernel pass wrote must see invalid hits,
+    // never garbage that can masquerade as one
+    fill(DetectorHit{}, &this->ref().detectors.detector_hits);
+
     if constexpr (M == MemSpace::device)
     {
         device_ref_vec_ = DeviceVector<Ref>(1);
@@ -166,6 +171,10 @@ void CoreState<M>::reset()
 
     // Mark all the track slots as empty
     fill_sequence(&this->ref().init.vacancies, this->stream_id());
+
+    // Drop any hits an aborted pass left behind: the delivery counter
+    // was just zeroed, so nothing may remain that could be re-delivered
+    fill(DetectorHit{}, &this->ref().detectors.detector_hits);
 }
 
 //---------------------------------------------------------------------------//

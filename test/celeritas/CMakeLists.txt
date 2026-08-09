@@ -474,6 +474,7 @@ celeritas_add_standalone_tests(optical/Generator WlsGeneratorTest census_wls_rec
 celeritas_add_standalone_tests(optical/Generator WlsGeneratorTest tail_record_not_dropped)
 celeritas_add_standalone_tests(optical/Generator TransportableWork predicate)
 celeritas_add_standalone_tests(optical/Detector DetectorTest simple)
+celeritas_add_standalone_tests(optical/Detector DetectorTest simple_compacted)
 celeritas_add_standalone_tests(optical/Detector DetectorTest stress)
 
 celeritas_add_test(optical/Absorption.test.cc)

@@ -33,8 +33,16 @@ void DetectorAction::step(CoreParams const& params, CoreStateDevice& state) cons
         state.ptr(),
         detail::DetectorExecutor{state.ref().detectors, counters}};
 
+    // EVERY track slot, not the compacted active prefix: the executor
+    // writes hits through the track-slot indirection, so a compacted
+    // launch's physical slots are scattered and slots it skips would keep
+    // stale hits for the full-range selection below to re-deliver. Running
+    // over the whole permutation visits each physical slot exactly once and
+    // clears the ones without hits, which is the executor's own documented
+    // contract (and the launcher's comment points compaction-exempt actions
+    // at exactly this overload).
     static ActionLauncher<decltype(execute)> const launch_kernel(*this);
-    launch_kernel(state, execute);
+    launch_kernel(range(ThreadId{state.size()}), state.stream_id(), execute);
 
     // One counter copy (and its sync) decides whether any hits need to come
     // over: most tail iterations score nothing, and skipping them saves the

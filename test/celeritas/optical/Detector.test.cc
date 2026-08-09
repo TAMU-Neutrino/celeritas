@@ -4,6 +4,7 @@
 //---------------------------------------------------------------------------//
 //! \file celeritas/optical/Detector.test.cc
 //---------------------------------------------------------------------------//
+#include <algorithm>
 #include <numeric>
 #include <utility>
 #include <vector>
@@ -259,6 +260,115 @@ TEST_F(DetectorTest, simple)
         EXPECT_VEC_EQ(expected_volume_instance_ids, scores.volume_instance_ids);
         EXPECT_VEC_EQ(expected_volume_unique_instance_ids,
                       scores.volume_unique_instance_ids);
+    }
+}
+
+TEST_F(DetectorTest, simple_compacted)
+{
+    // The same seven photons under FORCED TRACK COMPACTION with a short
+    // repartition period: partition_alive then permutes the thread-to-slot
+    // map for real and shrinks the active prefix as tracks die, so the
+    // detector pass runs against genuinely scattered physical slots and
+    // stale entries below the prefix. Every hit must still be delivered
+    // exactly once with the same content as the uncompacted run -- the
+    // detector pass covers every physical slot by contract, whatever the
+    // permutation. Delivery ORDER is slot order and may legitimately
+    // differ, so the comparison sorts by the (unique) energies.
+    // Registered as a standalone test: the compaction switch is latched
+    // once per process, so this must run in its own process.
+    setenv("CELER_TRACK_COMPACT", "1", 1);
+    setenv("CELER_TRACK_COMPACT_PERIOD", "2", 1);
+
+    SimpleScores scores;
+    osi_.problem.detectors.callback = SimpleScorer{scores};
+
+    using E = units::MevEnergy;
+    using TI = TrackInitializer;
+
+    std::vector<TI> const inits{
+        TI{E{1e-6}, Real3{0, 0, 0}, Real3{1, 0, 0}, Real3{0, 1, 0}, 0, {},
+           ImplVolumeId{0}},
+        TI{E{2e-6}, Real3{0, 0, 0}, Real3{-1, 0, 0}, Real3{0, 1, 0}, 0, {},
+           ImplVolumeId{0}},
+        TI{E{3e-6}, Real3{0, 0, 0}, Real3{0, 0, 1}, Real3{0, 1, 0}, 0, {},
+           ImplVolumeId{0}},
+        TI{E{4e-6}, Real3{0, 0, 0}, Real3{0, 0, -1}, Real3{0, 1, 0}, 0, {},
+           ImplVolumeId{0}},
+        TI{E{5e-6}, Real3{0, 0, 0}, Real3{1, 0, 0}, Real3{0, 1, 0}, 0, {},
+           ImplVolumeId{0}},
+        TI{E{6e-6}, Real3{0, 0, 0}, Real3{0, -1, 0}, Real3{1, 0, 0}, 0, {},
+           ImplVolumeId{0}},
+        TI{E{2e-7}, Real3{0, 0, 0}, Real3{1, 0, 0}, Real3{0, 1, 0}, 0, {},
+           ImplVolumeId{0}},
+    };
+
+    osi_.problem.model.geometry
+        = Test::test_data_path("geocel", "optical-box-det-tra.gdml");
+    osi_.problem.generator = celeritas::inp::OpticalDirectGenerator{};
+
+    optical::Runner run(std::move(osi_));
+    run.insert(make_span(std::as_const(inits)));
+    run();
+
+    unsetenv("CELER_TRACK_COMPACT");
+    unsetenv("CELER_TRACK_COMPACT_PERIOD");
+
+    ASSERT_EQ(7, scores.energies.size());
+
+    // Sort every field by energy (all seven are distinct)
+    std::vector<size_type> order(scores.energies.size());
+    std::iota(order.begin(), order.end(), size_type{0});
+    std::sort(order.begin(), order.end(), [&scores](size_type a, size_type b) {
+        return scores.energies[a] < scores.energies[b];
+    });
+    SimpleScores sorted;
+    for (auto i : order)
+    {
+        sorted.detector_ids.push_back(scores.detector_ids[i]);
+        sorted.energies.push_back(scores.energies[i]);
+        sorted.times.push_back(scores.times[i]);
+        sorted.x_positions.push_back(scores.x_positions[i]);
+        sorted.y_positions.push_back(scores.y_positions[i]);
+        sorted.z_positions.push_back(scores.z_positions[i]);
+        sorted.volume_instance_ids.push_back(scores.volume_instance_ids[i]);
+    }
+
+    real_type const box_size = from_cm(50);
+    real_type const flight_time = box_size / constants::c_light;
+
+    // The simple test's expectations, reordered by ascending energy
+    // (2e-7 first, then 1e-6 .. 6e-6)
+    static real_type const expected_energies[]
+        = {2e-07, 1e-6, 2e-6, 3e-6, 4e-6, 5e-6, 6e-6};
+    static size_type const expected_detector_ids[] = {1, 1, 1, 2, 2, 1, 0};
+    static real_type const expected_x_positions[]
+        = {box_size, box_size, -box_size, 0, 0, box_size, 0};
+    static real_type const expected_y_positions[]
+        = {0, 0, 0, 0, 0, 0, -box_size};
+    static real_type const expected_z_positions[]
+        = {0, 0, 0, box_size, -box_size, 0, 0};
+    static double const expected_times[] = {
+        flight_time,
+        1.49995 * flight_time,
+        1.3333 * flight_time,
+        3.66675 * flight_time,
+        2 * flight_time,
+        2 * flight_time,
+        2 * flight_time,
+    };
+    static size_type const expected_volume_instance_ids[]
+        = {5, 5, 4, 6, 7, 5, 3};
+
+    if (reference_configuration)
+    {
+        EXPECT_VEC_SOFT_EQ(expected_energies, sorted.energies);
+        EXPECT_VEC_EQ(expected_detector_ids, sorted.detector_ids);
+        EXPECT_VEC_SOFT_EQ(expected_x_positions, sorted.x_positions);
+        EXPECT_VEC_SOFT_EQ(expected_y_positions, sorted.y_positions);
+        EXPECT_VEC_SOFT_EQ(expected_z_positions, sorted.z_positions);
+        EXPECT_VEC_SOFT_EQ(expected_times, sorted.times);
+        EXPECT_VEC_EQ(expected_volume_instance_ids,
+                      sorted.volume_instance_ids);
     }
 }
 

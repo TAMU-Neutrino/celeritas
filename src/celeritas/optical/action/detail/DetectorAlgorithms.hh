@@ -34,7 +34,12 @@ struct IsHit
 };
 
 //---------------------------------------------------------------------------//
-// Stably compact the valid hits into the buffer's device storage
+// Stably compact the valid hits into the buffer's device storage. The
+// selection covers the WHOLE buffer on purpose: the detector pass writes
+// hits through the track-slot indirection, so the physical slots a
+// compacted launch touches are scattered -- only a full-range read is
+// mapping-independent, and the detector pass itself covers every physical
+// slot so no stale entry can survive into it.
 void copy_if_hit(DetectorStateRef<MemSpace::device> const&,
                  DetectorHitBuffer*,
                  size_type num_expected,
