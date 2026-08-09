@@ -565,8 +565,7 @@ void LocalOpticalGenOffload::ConsumerLoop()
             stall_iters = 0;
         }
 
-        if (counters.num_pending > 0 || counters.num_alive > 0
-            || counters.num_dist_written > 0)
+        if (has_transportable_work(counters))
         {
             counters = transport_->step_once(state, iter++, census_base_);
 

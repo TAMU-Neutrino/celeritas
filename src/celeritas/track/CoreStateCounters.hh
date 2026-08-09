@@ -99,4 +99,20 @@ struct CoreStateCounters
 };
 
 //---------------------------------------------------------------------------//
+/*!
+ * Whether optical transport still has work.
+ *
+ * Photons pending generation, live tracks, or a distribution stored by a
+ * track since the generator last ran. The last term matters when the storing
+ * track died in the same iteration: the record reaches \c num_pending only on
+ * the generator's next pass, so without it a blocking loop would exit -- and
+ * a streaming consumer would park -- with the photon still queued.
+ */
+inline bool has_transportable_work(CoreStateCounters const& counters)
+{
+    return counters.num_pending > 0 || counters.num_alive > 0
+           || counters.num_dist_written > 0;
+}
+
+//---------------------------------------------------------------------------//
 }  // namespace celeritas
