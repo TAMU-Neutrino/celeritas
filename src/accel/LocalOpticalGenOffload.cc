@@ -6,6 +6,8 @@
 //---------------------------------------------------------------------------//
 #include "LocalOpticalGenOffload.hh"
 
+#include <algorithm>
+#include <chrono>
 #include <condition_variable>
 #include <cstdlib>
 #include <mutex>
@@ -31,6 +33,137 @@ namespace celeritas
 {
 //---------------------------------------------------------------------------//
 /*!
+ * Host-side instrumentation for streaming optical transport.
+ *
+ * This state exists before the consumer starts so event registration can be
+ * timestamped in InitializeEvent. Each field is updated by either the producer
+ * or consumer alone; pump fields are updated under the existing stream mutex.
+ */
+struct LocalOpticalGenOffload::Instrumentation
+{
+    using Clock = std::chrono::steady_clock;
+    using Duration = Clock::duration;
+
+    struct EventRegistration
+    {
+        long ordinal;
+        Clock::time_point time;
+    };
+
+    struct Snapshot
+    {
+        size_type staged_bursts{0};
+        size_type staged_photons{0};
+        size_type idle_parks{0};
+        double idle_park_seconds{0};
+        size_type hit_mail_high_water{0};
+        size_type pump_count{0};
+        size_type pump_hits_total{0};
+        size_type pump_hits_max{0};
+        size_type registered_events{0};
+        size_type retired_events{0};
+        double retirement_seconds_total{0};
+        double retirement_seconds_mean{0};
+        double retirement_seconds_max{0};
+    };
+
+    void register_event(long ordinal)
+    {
+        pending_events.push_back({ordinal, Clock::now()});
+        ++registered_events;
+    }
+
+    void record_stage(size_type photons)
+    {
+        ++staged_bursts;
+        staged_photons += photons;
+    }
+
+    std::deque<EventRegistration> take_registrations()
+    {
+        std::deque<EventRegistration> result;
+        result.swap(pending_events);
+        return result;
+    }
+
+    void observe_events(std::deque<EventRegistration> const& registrations)
+    {
+        for (auto const& event : registrations)
+        {
+            events.push_back(event);
+        }
+    }
+
+    void record_park(Duration elapsed)
+    {
+        ++idle_parks;
+        idle_park_time += elapsed;
+    }
+
+    void record_pump(size_type hits)
+    {
+        ++pump_count;
+        pump_hits_total += hits;
+        pump_hits_max = std::max(pump_hits_max, hits);
+        hit_mail_high_water = std::max(hit_mail_high_water, hits);
+    }
+
+    void retire_through(long ordinal)
+    {
+        auto const now = Clock::now();
+        while (!events.empty() && events.front().ordinal <= ordinal)
+        {
+            Duration const elapsed = now - events.front().time;
+            retirement_time += elapsed;
+            retirement_max = std::max(retirement_max, elapsed);
+            ++retired_events;
+            events.pop_front();
+        }
+    }
+
+    Snapshot snapshot() const
+    {
+        Snapshot result;
+        result.staged_bursts = staged_bursts;
+        result.staged_photons = staged_photons;
+        result.idle_parks = idle_parks;
+        result.idle_park_seconds
+            = std::chrono::duration<double>(idle_park_time).count();
+        result.hit_mail_high_water = hit_mail_high_water;
+        result.pump_count = pump_count;
+        result.pump_hits_total = pump_hits_total;
+        result.pump_hits_max = pump_hits_max;
+        result.registered_events = registered_events;
+        result.retired_events = retired_events;
+        result.retirement_seconds_total
+            = std::chrono::duration<double>(retirement_time).count();
+        result.retirement_seconds_mean = retired_events > 0
+                                             ? result.retirement_seconds_total
+                                                   / retired_events
+                                             : 0;
+        result.retirement_seconds_max
+            = std::chrono::duration<double>(retirement_max).count();
+        return result;
+    }
+
+    std::deque<EventRegistration> pending_events;
+    std::deque<EventRegistration> events;
+    size_type staged_bursts{0};
+    size_type staged_photons{0};
+    size_type idle_parks{0};
+    Duration idle_park_time{Duration::zero()};
+    size_type hit_mail_high_water{0};
+    size_type pump_count{0};
+    size_type pump_hits_total{0};
+    size_type pump_hits_max{0};
+    size_type registered_events{0};
+    size_type retired_events{0};
+    Duration retirement_time{Duration::zero()};
+    Duration retirement_max{Duration::zero()};
+};
+
+//---------------------------------------------------------------------------//
+/*!
  * Producer-consumer channel for streaming injection.
  *
  * The producer (Geant4 worker) appends record bursts and collects hits; the
@@ -43,6 +176,7 @@ struct LocalOpticalGenOffload::Streaming
     {
         long event{0};
         size_type photons{0};
+        std::deque<Instrumentation::EventRegistration> registrations;
         std::vector<DistributionData> records;
     };
 
@@ -110,6 +244,7 @@ LocalOpticalGenOffload::LocalOpticalGenOffload(SetupOptions const& options,
             // streaming mode the detector action routes hits to the
             // consumer's sink instead of calling it on the transport thread
             user_hit_callback_ = options.optical->detectors.callback;
+            metrics_ = std::make_shared<Instrumentation>();
         }
     }
 
@@ -189,6 +324,7 @@ void LocalOpticalGenOffload::InitializeEvent(int id)
                        << " after " << event_ordinal_ << ")");
         bool const first = event_ordinal_ < 0;
         event_ordinal_ = id;
+        metrics_->register_event(event_ordinal_);
         if (!first)
         {
             // Tracks from earlier events may still be in flight on the
@@ -352,15 +488,31 @@ void LocalOpticalGenOffload::Finalize()
     auto const& accum = state_->accum();
     CELER_ASSERT(state_->aux());
     auto const& gen = generate_->counters(*state_->aux());
-    CELER_LOG_LOCAL(info) << "Finalizing Celeritas after " << accum.steps
-                          << " optical steps (over " << accum.step_iters
-                          << " step iterations)"
-                          << " from " << gen.accum.num_generated
-                          << " optical photons generated from "
-                          << gen.accum.buffer_size << " distributions"
-                          << "; absorbed " << absorb_bursts_
-                          << " bursts over " << absorb_drains_
-                          << " drains (max " << absorb_max_ << ")";
+    CELER_LOG_LOCAL(info)
+        << "Finalizing Celeritas after " << accum.steps
+        << " optical steps (over " << accum.step_iters << " step iterations)"
+        << " from " << gen.accum.num_generated
+        << " optical photons generated from " << gen.accum.buffer_size
+        << " distributions"
+        << "; absorbed " << absorb_bursts_ << " bursts over " << absorb_drains_
+        << " drains (max " << absorb_max_ << ")";
+
+    if (metrics_)
+    {
+        auto const metrics = metrics_->snapshot();
+        CELER_LOG_LOCAL(info)
+            << "Optical streaming metrics: staged " << metrics.staged_bursts
+            << " bursts with " << metrics.staged_photons << " photons; idle "
+            << metrics.idle_parks << " parks for " << metrics.idle_park_seconds
+            << " s; hit mail high-water " << metrics.hit_mail_high_water
+            << " hits; pumped " << metrics.pump_hits_total << " hits over "
+            << metrics.pump_count << " calls (max " << metrics.pump_hits_max
+            << "); event retirement " << metrics.retired_events
+            << " measured of " << metrics.registered_events << " registered, "
+            << metrics.retirement_seconds_total << " s total (mean "
+            << metrics.retirement_seconds_mean << " s, max "
+            << metrics.retirement_seconds_max << " s)";
+    }
 
     if (!gen.counters.empty())
     {
@@ -406,15 +558,18 @@ void LocalOpticalGenOffload::StageStreaming()
     }
 
     auto& sx = *stream_;
+    size_type const staged_photons = num_photons_;
     {
         std::lock_guard<std::mutex> lock{sx.mutex};
         Streaming::Burst burst;
         burst.event = event_ordinal_ < 0 ? 0 : event_ordinal_;
         burst.photons = num_photons_;
+        burst.registrations = metrics_->take_registrations();
         burst.records = std::move(buffer_);
         sx.staged.push_back(std::move(burst));
     }
     sx.cv.notify_one();
+    metrics_->record_stage(staged_photons);
 
     buffer_.clear();
     num_photons_ = 0;
@@ -437,6 +592,7 @@ long LocalOpticalGenOffload::PumpStreaming()
         std::lock_guard<std::mutex> lock{stream_->mutex};
         hits.swap(stream_->hit_mail);
         cursor = stream_->drained_event;
+        metrics_->record_pump(hits.size());
     }
     if (!hits.empty() && user_hit_callback_)
     {
@@ -525,8 +681,7 @@ void LocalOpticalGenOffload::ConsumerLoop()
         sx.hit_mail.insert(sx.hit_mail.end(), hits.begin(), hits.end());
     });
 
-    size_type const max_stall
-        = transport_->params()->sim()->max_step_iters();
+    size_type const max_stall = transport_->params()->sim()->max_step_iters();
 
     size_type iter{0};
     size_type stall_iters{0};
@@ -562,6 +717,7 @@ void LocalOpticalGenOffload::ConsumerLoop()
             }
             for (auto& b : bursts)
             {
+                metrics_->observe_events(b.registrations);
                 generate_->append(state, make_span(b.records));
                 absorbed_event = b.event;
                 // Cumulative photon total at the end of this event, against
@@ -608,9 +764,10 @@ void LocalOpticalGenOffload::ConsumerLoop()
             // could licence retiring an event whose tracks -- and their
             // re-emission records -- only came into existence after that
             // census closed. Waiting costs at most one census period.
-            bool const census_fresh = transport_->census_enabled()
-                && ((iter - 1) % transport_->census_period() == 0)
-                && counters.num_dist_written == 0;
+            bool const census_fresh
+                = transport_->census_enabled()
+                  && ((iter - 1) % transport_->census_period() == 0)
+                  && counters.num_dist_written == 0;
             if (census_fresh
                 && counters.min_live_event_rel < optical::event_ring)
             {
@@ -625,11 +782,14 @@ void LocalOpticalGenOffload::ConsumerLoop()
                 if (done > published_event_)
                 {
                     published_event_ = done;
-                    std::lock_guard<std::mutex> lock(sx.mutex);
-                    if (done > sx.drained_event)
                     {
-                        sx.drained_event = done;
+                        std::lock_guard<std::mutex> lock(sx.mutex);
+                        if (done > sx.drained_event)
+                        {
+                            sx.drained_event = done;
+                        }
                     }
+                    metrics_->retire_through(done);
                 }
                 // Keep the reduction's reference within a ring of everything
                 // in flight
@@ -661,8 +821,8 @@ void LocalOpticalGenOffload::ConsumerLoop()
                     << max_stall << " step iterations: aborting "
                     << counters.num_alive << " alive tracks and "
                     << counters.num_pending << " queued photons";
-                state.accum().num_cut
-                    += counters.num_active + counters.num_pending;
+                state.accum().num_cut += counters.num_active
+                                         + counters.num_pending;
                 transport_->params()->gen_reg()->reset(*state.aux());
                 state.reset();
                 counters = state.sync_get_counters();
@@ -683,6 +843,7 @@ void LocalOpticalGenOffload::ConsumerLoop()
                 continue;
             }
             sx.drained_event = absorbed_event;
+            metrics_->retire_through(absorbed_event);
             sx.idle = true;
             ++state.accum().flushes;
             sx.cv_host.notify_all();
@@ -690,7 +851,9 @@ void LocalOpticalGenOffload::ConsumerLoop()
             {
                 break;
             }
+            auto const park_start = Instrumentation::Clock::now();
             sx.cv.wait(lock, [&sx] { return !sx.staged.empty() || sx.stop; });
+            metrics_->record_park(Instrumentation::Clock::now() - park_start);
             sx.idle = false;
         }
     }

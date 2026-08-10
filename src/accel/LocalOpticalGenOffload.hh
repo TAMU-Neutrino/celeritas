@@ -131,6 +131,10 @@ class LocalOpticalGenOffload final : public LocalOffloadInterface
 
     //// STREAMING DATA ////
 
+    // Host-side streaming instrumentation (see .cc)
+    struct Instrumentation;
+    std::shared_ptr<Instrumentation> metrics_;
+
     // Producer-consumer channel and worker thread (see .cc)
     struct Streaming;
     std::shared_ptr<Streaming> stream_;
