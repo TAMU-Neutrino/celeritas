@@ -88,7 +88,7 @@ build_params_refs(CoreParams::Input const& p, CoreScalars const& scalars)
 /*!
  * Construct always-required actions and set IDs.
  */
-CoreScalars build_actions(ActionRegistry* reg)
+CoreScalars build_actions(ActionRegistry* reg, AuxParamsRegistry* aux_reg)
 {
     using std::make_shared;
 
@@ -111,7 +111,12 @@ CoreScalars build_actions(ActionRegistry* reg)
 
     //// END ACTIONS ////
 
-    reg->insert(make_shared<LocateVacanciesAction>(reg->next_id()));
+    // Both an action and an aux params interface: its per-stream selection
+    // scratch lives in aux state
+    auto locate_vacancies = make_shared<LocateVacanciesAction>(
+        reg->next_id(), aux_reg->next_id());
+    reg->insert(locate_vacancies);
+    aux_reg->insert(locate_vacancies);
 
     return scalars;
 }
@@ -171,7 +176,8 @@ CoreParams::CoreParams(Input&& input) : input_(std::move(input))
             OpticalSizes{this->sizes()}));
 
     // Construct always-on actions and save their IDs
-    CoreScalars scalars = build_actions(input_.action_reg.get());
+    CoreScalars scalars
+        = build_actions(input_.action_reg.get(), input_.aux_reg.get());
 
     // Construct detector callback action
     // TODO: Is there a better place to build this?

@@ -12,6 +12,8 @@
 #include "corecel/data/Collection.hh"
 #include "celeritas/Types.hh"
 
+#include "VacancyScratch.hh"
+
 namespace celeritas
 {
 namespace optical
@@ -35,12 +37,15 @@ struct IsVacant
 };
 
 //---------------------------------------------------------------------------//
-// Compact the \c TrackSlotIds of the inactive tracks
+// Compact the \c TrackSlotIds of the inactive tracks. The scratch holds the
+// persistent per-stream device buffers; the host selection ignores it.
 size_type copy_if_vacant(TrackStatusRef<MemSpace::host> const&,
                          TrackSlotRef<MemSpace::host> const&,
+                         VacancyScratch*,
                          StreamId);
 size_type copy_if_vacant(TrackStatusRef<MemSpace::device> const&,
                          TrackSlotRef<MemSpace::device> const&,
+                         VacancyScratch*,
                          StreamId);
 
 //---------------------------------------------------------------------------//
@@ -49,6 +54,7 @@ size_type copy_if_vacant(TrackStatusRef<MemSpace::device> const&,
 #if !CELER_USE_DEVICE
 inline size_type copy_if_vacant(TrackStatusRef<MemSpace::device> const&,
                                 TrackSlotRef<MemSpace::device> const&,
+                                VacancyScratch*,
                                 StreamId)
 {
     CELER_NOT_CONFIGURED("CUDA or HIP");

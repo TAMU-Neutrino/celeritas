@@ -20,6 +20,7 @@ namespace detail
  */
 size_type copy_if_vacant(TrackStatusRef<MemSpace::host> const& status,
                          TrackSlotRef<MemSpace::host> const& vacancies,
+                         VacancyScratch*,
                          StreamId)
 {
     CELER_EXPECT(status.size() == vacancies.size());

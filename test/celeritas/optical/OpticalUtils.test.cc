@@ -122,8 +122,13 @@ std::vector<int> locate_vacancies(std::vector<TrackStatus> const& input)
 
     StateRef<TrackStatus, M> status_ref(status);
     StateRef<TrackSlotId, M> vacancies_ref(vacancies);
+    optical::detail::VacancyScratch scratch;
+    if constexpr (M == MemSpace::device)
+    {
+        scratch.result = DeviceVector<size_type>(1, StreamId{0});
+    }
     size_type num_vacancies = optical::detail::copy_if_vacant(
-        status_ref, vacancies_ref, StreamId{0});
+        status_ref, vacancies_ref, &scratch, StreamId{0});
 
     auto host_vacancies = copy_to_host(vacancies);
 
@@ -250,6 +255,95 @@ TEST(OpticalUtilsTest, TEST_IF_CELER_DEVICE(copy_if_vacant_device))
     EXPECT_EQ(4, vacancies.size());
     static int const expected_vacancies[] = {2, 3, 4, 5};
     EXPECT_VEC_EQ(expected_vacancies, vacancies);
+}
+
+/*!
+ * The persistent scratch must serve repeated selections with changing
+ * vacancy patterns: correct sorted slot ids each time (the selection is
+ * stable, so ascending order is the contract), the same count, and no
+ * reallocation -- the scratch pointers grown by the first call must not
+ * move afterward.
+ */
+TEST(OpticalUtilsTest, TEST_IF_CELER_DEVICE(copy_if_vacant_scratch_persists))
+{
+    using TS = TrackStatus;
+
+    device().create_streams(1);
+    StreamId stream{0};
+    constexpr size_type num_slots = 64;
+
+    // Irregular, pass-dependent vacancy patterns over the same slots
+    auto make_status = [](int pass) {
+        std::vector<TrackStatus> status(num_slots, TS::alive);
+        for (size_type i = 0; i < num_slots; ++i)
+        {
+            if ((pass == 0 && (i % 3 == 0 || i % 7 == 0))
+                || (pass == 1 && i % 5 == 2) || (pass == 2 && i >= 60))
+            {
+                status[i] = (i % 2 ? TS::killed : TS::initializing);
+            }
+        }
+        return status;
+    };
+
+    StateVal<TrackSlotId, MemSpace::device> vacancies;
+    resize(&vacancies, num_slots);
+    StateRef<TrackSlotId, MemSpace::device> vacancies_ref(vacancies);
+
+    optical::detail::VacancyScratch scratch;
+    scratch.result = DeviceVector<size_type>(1, stream);
+
+    size_type const* result_ptr = scratch.result.data();
+    char const* temp_ptr = nullptr;
+    unsigned char const* flags_ptr = nullptr;
+
+    for (int pass = 0; pass < 3; ++pass)
+    {
+        auto status = make_status(pass);
+        StateVal<TrackStatus, MemSpace::host> host_status;
+        make_builder(&host_status).insert_back(status.begin(), status.end());
+        StateVal<TrackStatus, MemSpace::device> dev_status(host_status);
+        StateRef<TrackStatus, MemSpace::device> status_ref(dev_status);
+
+        std::vector<size_type> expected;
+        for (size_type i = 0; i < num_slots; ++i)
+        {
+            if (status[i] != TS::alive)
+            {
+                expected.push_back(i);
+            }
+        }
+        ASSERT_GT(expected.size(), 0u) << "pass " << pass;
+
+        size_type num_vacancies = optical::detail::copy_if_vacant(
+            status_ref, vacancies_ref, &scratch, stream);
+        EXPECT_EQ(expected.size(), num_vacancies) << "pass " << pass;
+
+        auto host_vacancies = copy_to_host(vacancies);
+        for (size_type i = 0; i < expected.size(); ++i)
+        {
+            EXPECT_EQ(expected[i],
+                      host_vacancies[TrackSlotId{i}].unchecked_get())
+                << "pass " << pass << " index " << i;
+        }
+
+        if (pass == 0)
+        {
+            // Whatever the first call grew is what every later call reuses
+            temp_ptr = scratch.temp.size() ? scratch.temp.data() : nullptr;
+            flags_ptr = scratch.flags.size() ? scratch.flags.data() : nullptr;
+        }
+        else
+        {
+            EXPECT_EQ(result_ptr, scratch.result.data()) << "pass " << pass;
+            EXPECT_EQ(temp_ptr,
+                      scratch.temp.size() ? scratch.temp.data() : nullptr)
+                << "pass " << pass;
+            EXPECT_EQ(flags_ptr,
+                      scratch.flags.size() ? scratch.flags.data() : nullptr)
+                << "pass " << pass;
+        }
+    }
 }
 
 //---------------------------------------------------------------------------//
