@@ -12,6 +12,8 @@
 #include "corecel/data/Collection.hh"
 #include "corecel/math/Algorithms.hh"
 
+#include "GeneratorScratch.hh"
+
 namespace celeritas
 {
 namespace optical
@@ -45,16 +47,20 @@ inline CELER_FUNCTION size_type find_distribution_index(
 }
 
 //---------------------------------------------------------------------------//
-// Calculate the inclusive prefix sum of the number of optical photons
+// Calculate the inclusive prefix sum of the number of optical photons. The
+// scratch holds the persistent temporary arena (null: use the stream pool);
+// the host implementation ignores it.
 template<class T>
 size_type inclusive_scan_photons(ItemsRef<T, MemSpace::host> const&,
                                  ItemsRef<size_type, MemSpace::host> const&,
                                  size_type,
+                                 GeneratorScratch*,
                                  StreamId);
 template<class T>
 size_type inclusive_scan_photons(ItemsRef<T, MemSpace::device> const&,
                                  ItemsRef<size_type, MemSpace::device> const&,
                                  size_type,
+                                 GeneratorScratch*,
                                  StreamId);
 
 //---------------------------------------------------------------------------//
@@ -66,6 +72,7 @@ inline size_type
 inclusive_scan_photons(ItemsRef<T, MemSpace::device> const&,
                        ItemsRef<size_type, MemSpace::device> const&,
                        size_type,
+                       GeneratorScratch*,
                        StreamId)
 {
     CELER_NOT_CONFIGURED("CUDA OR HIP");

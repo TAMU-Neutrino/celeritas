@@ -316,6 +316,7 @@ void GeneratorAction::step_impl(CoreParams const& params,
             aux_state.store.ref().distributions,
             aux_state.store.ref().offsets,
             counters.buffer_size,
+            &aux_state.scratch,
             state.stream_id());
     }
 

@@ -15,6 +15,8 @@
 #include "celeritas/optical/Types.hh"
 #include "celeritas/phys/GeneratorInterface.hh"
 
+#include "gen/detail/GeneratorScratch.hh"
+
 namespace celeritas
 {
 namespace optical
@@ -162,6 +164,9 @@ template<MemSpace M>
 struct WlsGeneratorState : public GeneratorStateBase
 {
     StateDataStore<WlsGeneratorStateData, M> store;
+
+    //! Persistent arena for the compaction/scan temporaries (device only)
+    detail::GeneratorScratch scratch;
 
     //! True if states have been allocated
     explicit operator bool() const { return static_cast<bool>(store); }

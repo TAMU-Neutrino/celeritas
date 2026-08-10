@@ -17,6 +17,7 @@
 #include "celeritas/phys/GeneratorInterface.hh"
 
 #include "../Types.hh"
+#include "detail/GeneratorScratch.hh"
 
 #if !CELER_DEVICE_COMPILE
 #    include <iosfwd>
@@ -160,6 +161,9 @@ template<MemSpace M>
 struct GeneratorState : public GeneratorStateBase
 {
     StateDataStore<GeneratorStateData, M> store;
+
+    //! Persistent arena for the scan temporaries (device states only)
+    detail::GeneratorScratch scratch;
 
     //! Access valid range of distributions
     auto distributions()

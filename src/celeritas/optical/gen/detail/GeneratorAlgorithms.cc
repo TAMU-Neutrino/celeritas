@@ -29,6 +29,7 @@ size_type
 inclusive_scan_photons(ItemsRef<T, MemSpace::host> const& buffer,
                        ItemsRef<size_type, MemSpace::host> const& offsets,
                        size_type size,
+                       GeneratorScratch*,
                        StreamId)
 {
     CELER_EXPECT(!buffer.empty());
@@ -58,11 +59,13 @@ template size_type inclusive_scan_photons(
     ItemsRef<GeneratorDistributionData, MemSpace::host> const&,
     ItemsRef<size_type, MemSpace::host> const&,
     size_type,
+    GeneratorScratch*,
     StreamId);
 template size_type
 inclusive_scan_photons(ItemsRef<WlsDistributionData, MemSpace::host> const&,
                        ItemsRef<size_type, MemSpace::host> const&,
                        size_type,
+                       GeneratorScratch*,
                        StreamId);
 
 //---------------------------------------------------------------------------//

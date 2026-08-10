@@ -14,10 +14,13 @@
 #include "corecel/cont/Span.hh"
 #include "corecel/data/CollectionAlgorithms.hh"
 #include "corecel/data/CollectionBuilder.hh"
+#include "corecel/data/Copier.hh"
 #include "corecel/data/Ref.hh"
 #include "corecel/math/Algorithms.hh"
+#include "celeritas/optical/WavelengthShiftData.hh"
 #include "celeritas/optical/action/detail/TrackInitAlgorithms.hh"
 #include "celeritas/optical/gen/detail/GeneratorAlgorithms.hh"
+#include "celeritas/optical/gen/detail/OffloadAlgorithms.hh"
 #include "celeritas/optical/detail/EventCensus.hh"
 
 #include "celeritas_test.hh"
@@ -342,6 +345,111 @@ TEST(OpticalUtilsTest, TEST_IF_CELER_DEVICE(copy_if_vacant_scratch_persists))
             EXPECT_EQ(flags_ptr,
                       scratch.flags.size() ? scratch.flags.data() : nullptr)
                 << "pass " << pass;
+        }
+    }
+}
+
+/*!
+ * The generator algorithms must produce correct results from the persistent
+ * scratch arena across repeated calls with changing data: stable in-place
+ * compaction of the valid distributions, correct prefix sums and totals,
+ * and -- once the arena has grown to the demand high-water -- no further
+ * reallocation. Pass sizes DECREASE so the warm arena covers every later
+ * call and the pointer-stability assertion is meaningful.
+ */
+TEST(OpticalUtilsTest, TEST_IF_CELER_DEVICE(generator_scratch_persists))
+{
+    using optical::WlsDistributionData;
+
+    device().create_streams(1);
+    StreamId stream{0};
+
+    optical::detail::GeneratorScratch scratch;
+    char const* warm_ptr = nullptr;
+
+    auto make_valid = [](unsigned int n) {
+        WlsDistributionData d;
+        d.type = GeneratorType::wls;
+        d.num_photons = n;
+        d.energy = units::MevEnergy{1e-6};
+        d.material = OptMatId{0};
+        return d;
+    };
+
+    for (int pass = 0; pass < 3; ++pass)
+    {
+        size_type const num = 56 - 8 * pass;
+        std::vector<WlsDistributionData> input;
+        std::vector<unsigned int> expected_photons;
+        for (size_type i = 0; i < num; ++i)
+        {
+            if ((i + pass) % 3 == 0)
+            {
+                input.push_back({});
+            }
+            else
+            {
+                unsigned int n = 1 + (i * 7 + pass) % 5;
+                input.push_back(make_valid(n));
+                expected_photons.push_back(n);
+            }
+        }
+
+        Collection<WlsDistributionData, Ownership::value, MemSpace::host> hbuf;
+        make_builder(&hbuf).insert_back(input.begin(), input.end());
+        Collection<WlsDistributionData, Ownership::value, MemSpace::device>
+            dbuf(hbuf);
+        Collection<WlsDistributionData, Ownership::reference, MemSpace::device>
+            dref(dbuf);
+
+        // Stable in-place compaction of the valid entries
+        size_type nvalid = celeritas::detail::remove_if_invalid(
+            dref, 0, num, &scratch, stream);
+        ASSERT_EQ(expected_photons.size(), nvalid) << "pass " << pass;
+
+        auto compacted = copy_to_host(dbuf);
+        for (size_type i = 0; i < nvalid; ++i)
+        {
+            EXPECT_EQ(expected_photons[i],
+                      compacted[ItemId<WlsDistributionData>{i}].num_photons)
+                << "pass " << pass << " index " << i;
+        }
+
+        // Prefix sums over the compacted buffer from the same arena
+        Collection<size_type, Ownership::value, MemSpace::device> doff;
+        resize(&doff, num);
+        Collection<size_type, Ownership::reference, MemSpace::device> doff_ref(
+            doff);
+        size_type total = optical::detail::inclusive_scan_photons(
+            dref, doff_ref, nvalid, &scratch, stream);
+
+        std::vector<size_type> expected_offsets(nvalid);
+        size_type acc = 0;
+        for (size_type i = 0; i < nvalid; ++i)
+        {
+            acc += expected_photons[i];
+            expected_offsets[i] = acc;
+        }
+        EXPECT_EQ(acc, total) << "pass " << pass;
+
+        auto host_off = copy_to_host(doff);
+        std::vector<size_type> offsets(nvalid);
+        for (size_type i = 0; i < nvalid; ++i)
+        {
+            offsets[i] = host_off[ItemId<size_type>{i}];
+        }
+        EXPECT_VEC_EQ(expected_offsets, offsets) << "pass " << pass;
+
+        if (pass == 1)
+        {
+            // The arena has now grown to the largest pass's demand
+            EXPECT_GT(scratch.temp.size(), 0u);
+            warm_ptr = scratch.temp.data();
+        }
+        else if (pass == 2)
+        {
+            // Smaller demand: the warm arena serves it without reallocating
+            EXPECT_EQ(warm_ptr, scratch.temp.data());
         }
     }
 }

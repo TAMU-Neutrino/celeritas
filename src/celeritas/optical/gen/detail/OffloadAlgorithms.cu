@@ -20,6 +20,8 @@
 #include "corecel/sys/ScopedProfiling.hh"
 #include "corecel/sys/Thrust.device.hh"
 
+#include "ScratchExecute.device.hh"
+
 using namespace celeritas::literals;
 
 namespace celeritas
@@ -36,12 +38,28 @@ template<class T>
 size_type remove_if_invalid(ItemsRef<T, MemSpace::device> const& buffer,
                             size_type offset,
                             size_type size,
+                            GeneratorScratch* scratch,
                             StreamId stream)
 {
     ScopedProfiling profile_this{"remove-if-invalid"};
     auto start = thrust::device_pointer_cast(buffer.data().get());
-    auto stop = thrust::remove_if(
-        thrust_execute_on(stream), start + offset, start + size, LogicalNot{});
+    auto compact = [&](auto&& policy) {
+        return thrust::remove_if(
+            policy, start + offset, start + size, LogicalNot{});
+    };
+    decltype(compact(thrust_execute_on(stream))) stop;
+    if (scratch)
+    {
+        // Temporaries come from the persistent arena instead of cycling
+        // through the stream pool every call
+        celeritas::optical::detail::ScratchMr mr{*scratch, stream};
+        stop = compact(
+            celeritas::optical::detail::thrust_execute_scratch(&mr, stream));
+    }
+    else
+    {
+        stop = compact(thrust_execute_on(stream));
+    }
     CELER_DEVICE_API_CALL(PeekAtLastError());
     return stop - start;
 }
@@ -77,11 +95,13 @@ template size_type
 remove_if_invalid(ItemsRef<GeneratorDistributionData, MemSpace::device> const&,
                   size_type,
                   size_type,
+                  GeneratorScratch*,
                   StreamId);
 template size_type
 remove_if_invalid(ItemsRef<WlsDistributionData, MemSpace::device> const&,
                   size_type,
                   size_type,
+                  GeneratorScratch*,
                   StreamId);
 
 //---------------------------------------------------------------------------//

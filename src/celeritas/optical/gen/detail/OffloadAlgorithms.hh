@@ -14,6 +14,7 @@
 #include "celeritas/optical/WavelengthShiftData.hh"
 
 #include "../GeneratorData.hh"
+#include "GeneratorScratch.hh"
 
 namespace celeritas
 {
@@ -22,18 +23,27 @@ namespace detail
 //---------------------------------------------------------------------------//
 using celeritas::optical::GeneratorDistributionData;
 using celeritas::optical::WlsDistributionData;
+using GeneratorScratch = celeritas::optical::detail::GeneratorScratch;
 
 template<class T, MemSpace M>
 using ItemsRef = Collection<T, Ownership::reference, M>;
 
 //---------------------------------------------------------------------------//
-// Remove all invalid distributions from the buffer.
+// Remove all invalid distributions from the buffer. The scratch holds the
+// persistent temporary arena (null: use the stream pool); the host
+// implementation ignores it.
 template<class T>
-size_type remove_if_invalid(
-    ItemsRef<T, MemSpace::host> const&, size_type, size_type, StreamId);
+size_type remove_if_invalid(ItemsRef<T, MemSpace::host> const&,
+                            size_type,
+                            size_type,
+                            GeneratorScratch*,
+                            StreamId);
 template<class T>
-size_type remove_if_invalid(
-    ItemsRef<T, MemSpace::device> const&, size_type, size_type, StreamId);
+size_type remove_if_invalid(ItemsRef<T, MemSpace::device> const&,
+                            size_type,
+                            size_type,
+                            GeneratorScratch*,
+                            StreamId);
 
 //---------------------------------------------------------------------------//
 // Count the number of optical photons in the distributions.
@@ -53,8 +63,11 @@ count_num_photons(ItemsRef<GeneratorDistributionData, MemSpace::device> const&,
 //---------------------------------------------------------------------------//
 #if !CELER_USE_DEVICE
 template<class T>
-inline size_type remove_if_invalid(
-    ItemsRef<T, MemSpace::device> const&, size_type, size_type, StreamId)
+inline size_type remove_if_invalid(ItemsRef<T, MemSpace::device> const&,
+                                   size_type,
+                                   size_type,
+                                   GeneratorScratch*,
+                                   StreamId)
 {
     CELER_NOT_CONFIGURED("CUDA OR HIP");
 }

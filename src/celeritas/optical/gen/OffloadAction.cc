@@ -103,8 +103,10 @@ void OffloadAction<G>::step_impl(CoreParams const& core_params,
 
     // Compact the buffer, returning the total number of valid distributions
     size_type start = buffer_size;
+    // Null scratch: this integrated-path action keeps the stream-pool
+    // temporaries; only the streaming consumer loop carries the arena
     buffer_size = detail::remove_if_invalid(
-        buffer, start, start + core_state.size(), core_state.stream_id());
+        buffer, start, start + core_state.size(), nullptr, core_state.stream_id());
 
     // Count the number of optical photons that would be generated from the
     // distributions created in this step

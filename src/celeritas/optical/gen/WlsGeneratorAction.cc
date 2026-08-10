@@ -148,7 +148,11 @@ void WlsGeneratorAction::step_impl(CoreParams const& params,
 
     // Compact the buffer, returning the total number of valid distributions
     counters.buffer_size = celeritas::detail::remove_if_invalid(
-        buffer, 0, counters.buffer_size + state.size(), state.stream_id());
+        buffer,
+        0,
+        counters.buffer_size + state.size(),
+        &aux_state.scratch,
+        state.stream_id());
 
     if (counters.buffer_size > 0)
     {
@@ -159,6 +163,7 @@ void WlsGeneratorAction::step_impl(CoreParams const& params,
             aux_state.store.ref().distributions,
             aux_state.store.ref().offsets,
             counters.buffer_size,
+            &aux_state.scratch,
             state.stream_id());
     }
 
@@ -178,7 +183,7 @@ void WlsGeneratorAction::step_impl(CoreParams const& params,
         // Compact the buffer again to remove stale distributions and free up
         // space to add new distributions during this step
         counters.buffer_size = celeritas::detail::remove_if_invalid(
-            buffer, 0, counters.buffer_size, state.stream_id());
+            buffer, 0, counters.buffer_size, &aux_state.scratch, state.stream_id());
     }
 
     // Ensure the buffer is large enough to hold WLS distributions created

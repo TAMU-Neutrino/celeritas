@@ -45,6 +45,7 @@ template<class T>
 size_type remove_if_invalid(ItemsRef<T, MemSpace::host> const& buffer,
                             size_type offset,
                             size_type size,
+                            GeneratorScratch*,
                             StreamId)
 {
     auto* start = buffer.data().get();
@@ -76,11 +77,13 @@ template size_type
 remove_if_invalid(ItemsRef<GeneratorDistributionData, MemSpace::host> const&,
                   size_type,
                   size_type,
+                  GeneratorScratch*,
                   StreamId);
 template size_type
 remove_if_invalid(ItemsRef<WlsDistributionData, MemSpace::host> const&,
                   size_type,
                   size_type,
+                  GeneratorScratch*,
                   StreamId);
 
 //---------------------------------------------------------------------------//
