@@ -49,6 +49,7 @@ endif()
 #-----------------------------------------------------------------------------#
 
 celeritas_add_test(ExceptionConverter.test.cc)
+celeritas_add_test(OpticalEventTable.test.cc)
 celeritas_add_test(HepMC3PrimaryGenerator.test.cc
   ${_needs_hepmc}
   ENVIRONMENT "${CELER_G4ENV}")
