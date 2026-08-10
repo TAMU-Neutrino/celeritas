@@ -13,7 +13,6 @@
 #include "TrackSlotExecutor.hh"
 
 #include "detail/DetectorExecutor.hh"
-#include "detail/DetectorHitBuffer.hh"
 
 namespace celeritas
 {
@@ -21,39 +20,13 @@ namespace optical
 {
 //---------------------------------------------------------------------------//
 /*!
- * Construct with action ID, aux ID, and callback.
+ * Construct with action ID.
  */
-DetectorAction::DetectorAction(ActionId aid,
-                               AuxId aux_id,
-                               CallbackFunc const& callback)
-    : sad_{aid, "detector", "Score optical detector hits"}
-    , aux_id_{aux_id}
+DetectorAction::DetectorAction(ActionId aid, CallbackFunc const& callback)
+    : StaticConcreteAction(aid, "detector", "Score optical detector hits")
     , callback_(callback)
 {
-    CELER_EXPECT(aux_id_);
     CELER_EXPECT(callback);
-}
-
-//---------------------------------------------------------------------------//
-/*!
- * Build the per-stream delivery buffers.
- *
- * The track-slot capacity bounds how many hits a pass can score, so the
- * device compaction buffer and the pinned host landing buffer are sized to
- * it once. Host-memspace states deliver straight from their own state
- * buffer, so their aux state stays empty.
- */
-auto DetectorAction::create_state(MemSpace m, StreamId id, size_type size) const
-    -> UPState
-{
-    auto buf = std::make_unique<detail::DetectorHitBuffer>();
-    if (m == MemSpace::device)
-    {
-        buf->compact = DeviceVector<DetectorHit>(size, id);
-        buf->result = DeviceVector<size_type>(1, id);
-        buf->host.resize(size);
-    }
-    return buf;
 }
 
 //---------------------------------------------------------------------------//
@@ -97,7 +70,7 @@ void DetectorAction::step(CoreParams const& params, CoreStateHost& state) const
         std::copy_if(
             all_hits.begin(), all_hits.end(), temp_hits.begin(), Identity{}),
         temp_hits.end());
-    this->callback_hits(make_span(temp_hits), state);
+    this->callback_hits(temp_hits, state);
 }
 
 //---------------------------------------------------------------------------//
@@ -110,15 +83,46 @@ void DetectorAction::step(CoreParams const&, CoreStateDevice&) const
 
 //---------------------------------------------------------------------------//
 /*!
- * Process hits and send them to the callback.
+ * Process hits copied from the kernels and send them to the callback.
  *
- * Only valid hits arrive here. The callback is only executed when a
- * non-zero number of valid hits occurs. A state with a hit sink (streaming
- * mode) receives the hits there instead: the sink runs on the transport
- * thread and hands them to the producer thread, whose thread-local receiver
- * state the global callback may depend on.
+ * \todo Replace this with asynchronous calls into pinned memory in aux
+ * state, followed by an asynchronous callback.
  */
-void DetectorAction::callback_hits(Span<DetectorHit const> hits,
+auto DetectorAction::load_hits_sync(CoreStateDevice const& state) const
+    -> VecHit
+{
+    auto const& native_hits = state.ref().detectors.detector_hits;
+    VecHit temp_hits(native_hits.size());
+
+    // The caller's counter read already synchronized the stream after the
+    // detector kernel, so the buffer is complete
+
+    // Copy all track hits to host from device
+    copy_to_host(native_hits, make_span(temp_hits), state.stream_id());
+
+    // Ensure copy is complete
+    celeritas::device().stream(state.stream_id()).sync();
+
+    // Erase all hits with invalid detector ID
+    temp_hits.erase(
+        std::remove_if(temp_hits.begin(), temp_hits.end(), LogicalNot{}),
+        temp_hits.end());
+
+    return temp_hits;
+}
+
+//---------------------------------------------------------------------------//
+/*!
+ * Process hits copied from the kernels and send them to the callback.
+ *
+ * Copied hits might be invalid, and are removed before sending into the
+ * callback function. The callback is only executed when a non-zero number of
+ * valid hits occurs. A state with a hit sink (streaming mode) receives the
+ * hits there instead: the sink runs on the transport thread and hands them
+ * to the producer thread, whose thread-local receiver state the global
+ * callback may depend on.
+ */
+void DetectorAction::callback_hits(VecHit const& hits,
                                    CoreStateBase const& state) const
 {
     if (hits.empty())
@@ -127,10 +131,10 @@ void DetectorAction::callback_hits(Span<DetectorHit const> hits,
     }
     if (auto const& sink = state.hit_sink())
     {
-        sink(hits);
+        sink(make_span(hits));
         return;
     }
-    callback_(hits);
+    callback_(make_span(hits));
 }
 
 //---------------------------------------------------------------------------//
