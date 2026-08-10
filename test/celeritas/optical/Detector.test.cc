@@ -363,9 +363,15 @@ TEST_F(DetectorTest, simple_compacted)
     {
         EXPECT_VEC_SOFT_EQ(expected_energies, sorted.energies);
         EXPECT_VEC_EQ(expected_detector_ids, sorted.detector_ids);
-        EXPECT_VEC_SOFT_EQ(expected_x_positions, sorted.x_positions);
-        EXPECT_VEC_SOFT_EQ(expected_y_positions, sorted.y_positions);
-        EXPECT_VEC_SOFT_EQ(expected_z_positions, sorted.z_positions);
+        // Positions carry a navigation-bump-scale wobble under
+        // repartitioning (measured 2e-9 relative on the A30): the slot a
+        // photon transports in legitimately changes its boundary-crossing
+        // arithmetic in the last bits. Everything identifying the hit --
+        // detector, energy, instance, time -- must still match tightly.
+        real_type const pos_tol{1e-6};
+        EXPECT_VEC_NEAR(expected_x_positions, sorted.x_positions, pos_tol);
+        EXPECT_VEC_NEAR(expected_y_positions, sorted.y_positions, pos_tol);
+        EXPECT_VEC_NEAR(expected_z_positions, sorted.z_positions, pos_tol);
         EXPECT_VEC_SOFT_EQ(expected_times, sorted.times);
         EXPECT_VEC_EQ(expected_volume_instance_ids,
                       sorted.volume_instance_ids);
