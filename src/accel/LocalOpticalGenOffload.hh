@@ -6,9 +6,7 @@
 //---------------------------------------------------------------------------//
 #pragma once
 
-#include <deque>
 #include <memory>
-#include <utility>
 #include <vector>
 
 #include "corecel/Types.hh"
@@ -22,12 +20,10 @@ class G4EventManager;
 
 namespace celeritas
 {
-namespace optical
+namespace detail
 {
-class CoreStateBase;
-class GeneratorAction;
-class Transporter;
-}  // namespace optical
+class OpticalLane;
+}  // namespace detail
 
 struct SetupOptions;
 class SharedParams;
@@ -76,7 +72,7 @@ class LocalOpticalGenOffload final : public LocalOffloadInterface
     void Finalize() final;
 
     // Whether the class instance is initialized
-    bool Initialized() const final { return static_cast<bool>(state_); }
+    bool Initialized() const final;
 
     // Number of buffered tracks
     size_type GetBufferSize() const final { return num_photons_; }
@@ -107,14 +103,8 @@ class LocalOpticalGenOffload final : public LocalOffloadInterface
     long PumpStreaming();
 
   private:
-    // Transport pending optical tracks
-    std::shared_ptr<optical::Transporter> transport_;
-
-    // Action for generating optical photons from distribution data
-    std::shared_ptr<optical::GeneratorAction const> generate_;
-
-    // Thread-local state data
-    std::shared_ptr<optical::CoreStateBase> state_;
+    // Lane-local transport state and streaming consumer
+    std::shared_ptr<detail::OpticalLane> lane_;
 
     // Buffered distributions for offloading
     std::vector<DistributionData> buffer_;
@@ -129,19 +119,6 @@ class LocalOpticalGenOffload final : public LocalOffloadInterface
     UniqueEventId event_id_;
     G4EventManager* event_manager_{nullptr};
 
-    //// STREAMING DATA ////
-
-    // Host-side streaming instrumentation (see .cc)
-    struct Instrumentation;
-    std::shared_ptr<Instrumentation> metrics_;
-
-    // Producer-consumer channel and worker thread (see .cc)
-    struct Streaming;
-    std::shared_ptr<Streaming> stream_;
-
-    // User hit callback, invoked from PumpStreaming on the producer thread
-    HitCallbackFunc user_hit_callback_;
-
     // Set from OpticalSetupOptions::streaming at construction
     bool streaming_{false};
 
@@ -152,34 +129,6 @@ class LocalOpticalGenOffload final : public LocalOffloadInterface
 
     // One-shot marker for the reseed-disabled note
     bool reseed_note_logged_{false};
-
-    //// EVENT-CENSUS ACCOUNTING (consumer thread only) ////
-
-    // (event, cumulative photons staged through it), oldest first
-    std::deque<std::pair<long, size_type>> staged_;
-    size_type staged_photons_{0};
-    // Highest event whose photons have all been generated
-    long fully_generated_{-1};
-    // Highest event already published as complete
-    long published_event_{-1};
-    // Reference ordinal for the census reduction: the oldest event not yet
-    // retired, which keeps everything in flight within one ring of it
-    size_type census_base_{0};
-
-    // Drain accounting: how many staged bursts each swap of the staging
-    // vector absorbed together. This -- not the producer's staging count
-    // -- is what sizes a fused multi-burst append: every absorbed burst
-    // is one append with its own counter round trip today.
-    size_type absorb_drains_{0};
-    size_type absorb_bursts_{0};
-    size_type absorb_max_{0};
-
-    //// STREAMING HELPERS ////
-
-    void StartConsumer();
-    void StopConsumer();
-    void ConsumerLoop();
-    void WaitStreamingDrained();
 };
 
 //---------------------------------------------------------------------------//

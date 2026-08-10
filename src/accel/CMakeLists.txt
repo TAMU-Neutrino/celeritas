@@ -45,6 +45,7 @@ list(APPEND SOURCES
   detail/GeantSimpleCaloSD.cc
   detail/LoggerImpl.cc
   detail/IntegrationSingleton.cc
+  detail/OpticalLane.cc
   gen/CherenkovOffload.cc
   gen/ScintillationOffload.cc
 )
