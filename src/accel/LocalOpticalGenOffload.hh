@@ -96,10 +96,10 @@ class LocalOpticalGenOffload final : public LocalOffloadInterface
     // current event ordinal, and return immediately
     void StageStreaming();
 
-    // Deliver hits collected by the consumer on the calling thread and
-    // return the highest event ordinal known complete (-1 if none). The
-    // ordinal counts InitializeEvent calls on this thread, zero-based; it
-    // advances when the consumer fully drains its queue.
+    // Try to deliver hits collected by the consumer on the calling thread and
+    // return the highest event ordinal delivered through (-1 if none or if
+    // another thread is pumping). The ordinal counts InitializeEvent calls on
+    // this thread, zero-based.
     long PumpStreaming();
 
   private:

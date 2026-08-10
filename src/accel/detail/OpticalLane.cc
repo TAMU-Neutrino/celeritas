@@ -317,9 +317,33 @@ void OpticalLane::StageStreaming(std::vector<DistributionData>& buffer,
 
 //---------------------------------------------------------------------------//
 /*!
- * Deliver collected hits on the calling thread; return the drain cursor.
+ * Deliver collected hits on the calling thread; return delivered-through.
  */
 long OpticalLane::PumpStreaming()
+{
+    std::lock_guard<std::mutex> pump_lock{pump_mutex_};
+    return this->PumpStreamingImpl();
+}
+
+//---------------------------------------------------------------------------//
+/*!
+ * Try to deliver collected hits without waiting for another pumper.
+ */
+long OpticalLane::TryPumpStreaming()
+{
+    std::unique_lock<std::mutex> pump_lock{pump_mutex_, std::try_to_lock};
+    if (!pump_lock)
+    {
+        return -1;
+    }
+    return this->PumpStreamingImpl();
+}
+
+//---------------------------------------------------------------------------//
+/*!
+ * Deliver collected hits while holding the exclusive pump gate.
+ */
+long OpticalLane::PumpStreamingImpl()
 {
     if (!stream_)
     {
@@ -338,7 +362,11 @@ long OpticalLane::PumpStreaming()
     {
         user_hit_callback_(make_span(hits));
     }
-    return cursor;
+    if (cursor > delivered_through_)
+    {
+        delivered_through_ = cursor;
+    }
+    return delivered_through_;
 }
 
 //---------------------------------------------------------------------------//

@@ -8,6 +8,7 @@
 
 #include <deque>
 #include <memory>
+#include <mutex>
 #include <utility>
 #include <vector>
 
@@ -77,8 +78,11 @@ class OpticalLane
                         size_type& num_photons,
                         long event_ordinal);
 
-    // Deliver collected hits on the calling thread and return the drain cursor
+    // Deliver collected hits under the pump gate and return delivered-through
     long PumpStreaming();
+
+    // Try to pump without blocking; return no cursor if the gate is busy
+    long TryPumpStreaming();
 
     //! Whether the consumer thread has been started
     bool StreamingStarted() const { return static_cast<bool>(stream_); }
@@ -135,6 +139,12 @@ class OpticalLane
     size_type absorb_bursts_{0};
     size_type absorb_max_{0};
 
+    // Serialize mailbox swaps and callback delivery on this lane
+    std::mutex pump_mutex_;
+
+    // Highest transport cursor whose hit callback has completed
+    long delivered_through_{-1};
+
     // Producer-consumer state is last so its destructor joins the consumer
     // before any state referenced by that thread is destroyed
     std::shared_ptr<Streaming> stream_;
@@ -143,6 +153,7 @@ class OpticalLane
 
     void StartConsumer();
     void ConsumerLoop();
+    long PumpStreamingImpl();
 };
 
 //---------------------------------------------------------------------------//

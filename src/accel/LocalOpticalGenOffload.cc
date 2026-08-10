@@ -213,7 +213,7 @@ void LocalOpticalGenOffload::Flush()
         ScopedProfiling profile_this("flush-streaming");
         this->StageStreaming();
         lane_->WaitStreamingDrained();
-        this->PumpStreaming();
+        lane_->PumpStreaming();
         return;
     }
 
@@ -291,7 +291,7 @@ void LocalOpticalGenOffload::Finalize()
         this->StageStreaming();
         lane_->WaitStreamingDrained();
         lane_->StopConsumer();
-        this->PumpStreaming();
+        lane_->PumpStreaming();
     }
 
     CELER_VALIDATE(buffer_.empty(),
@@ -320,11 +320,11 @@ void LocalOpticalGenOffload::StageStreaming()
 
 //---------------------------------------------------------------------------//
 /*!
- * Deliver collected hits on the calling thread; return the drain cursor.
+ * Try to deliver collected hits; return the delivered-through cursor.
  */
 long LocalOpticalGenOffload::PumpStreaming()
 {
-    return lane_ ? lane_->PumpStreaming() : -1;
+    return lane_ ? lane_->TryPumpStreaming() : -1;
 }
 
 //---------------------------------------------------------------------------//
