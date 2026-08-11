@@ -77,7 +77,8 @@ std::shared_ptr<OpticalService> acquire_optical_service(
                 && registry.options.staged_bytes_limit
                        == options.staged_bytes_limit
                 && registry.options.base_ordinal == options.base_ordinal
-                && registry.options.log_metrics == options.log_metrics,
+                && registry.options.log_metrics == options.log_metrics
+                && registry.options.num_producers == options.num_producers,
             << "inconsistent shared optical service options");
     }
     else
@@ -208,6 +209,7 @@ LocalOpticalGenOffload::LocalOpticalGenOffload(SetupOptions const& options,
                 sizes.generators * sizeof(DistributionData));
         service_options.base_ordinal = shared_config.base_ordinal;
         service_options.log_metrics = true;
+        service_options.num_producers = params.num_streams();
 
         auto make_lane = [transport, generate, tracks = sizes.tracks](
                              OpticalService::LaneId lane) {

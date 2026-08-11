@@ -56,6 +56,7 @@ class OpticalTransportService
         size_type staged_bytes_limit{0};
         long base_ordinal{0};
         bool log_metrics{false};
+        size_type num_producers{0};  //!< Fixed topology; zero if unspecified
     };
 
     struct PumpResult

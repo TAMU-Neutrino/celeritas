@@ -265,6 +265,153 @@ TEST(OpticalTransportServiceTest, multi_burst_mid_event_pause)
 }
 
 //---------------------------------------------------------------------------//
+TEST(OpticalTransportServiceTest, deterministic_single_lane_admission_schedule)
+{
+    constexpr long num_events = 8;
+    constexpr int num_replays = 12;
+    using CommandSchedule = FakeOpticalLaneState::CommandSchedule;
+    auto const reseed
+        = static_cast<int>(detail::OpticalTransportLaneCommandType::reseed);
+    auto const burst
+        = static_cast<int>(detail::OpticalTransportLaneCommandType::burst);
+    auto const close
+        = static_cast<int>(detail::OpticalTransportLaneCommandType::close);
+    CommandSchedule expected{{reseed, 0}};
+    for (long ordinal = 0; ordinal < num_events; ++ordinal)
+    {
+        expected.emplace_back(burst, ordinal);
+        expected.emplace_back(burst, ordinal);
+        expected.emplace_back(close, ordinal);
+    }
+
+    for (int replay = 0; replay < num_replays; ++replay)
+    {
+        FakeLaneSetup fake{1};
+        fake.configs[0].delay = 1us;
+        fake.configs[0].jitter = std::chrono::microseconds{(replay * 7) % 13};
+        HitCollector hits;
+        Service::Options options;
+        options.num_lanes = 1;
+        options.unresolved_limit = num_events;
+        options.staged_bytes_limit = 2 * num_events;
+        options.num_producers = 1;
+        Service service{options, fake.factory(), hits.callback()};
+        {
+            auto token = service.make_producer();
+            std::mt19937 jitter{static_cast<unsigned int>(1234 + replay)};
+            auto yield_randomly = [&] {
+                for (unsigned int i = 0; i < jitter() % 5; ++i)
+                {
+                    std::this_thread::yield();
+                }
+            };
+
+            for (long ordinal = 0; ordinal < num_events; ++ordinal)
+            {
+                yield_randomly();
+                token.register_event(ordinal);
+                yield_randomly();
+                token.submit_burst(ordinal, 1, 1);
+                yield_randomly();
+                token.submit_burst(ordinal, 1, 1);
+                yield_randomly();
+                token.close_event(ordinal);
+            }
+            for (long ordinal = 0; ordinal < num_events; ++ordinal)
+            {
+                token.wait_until_complete(ordinal);
+            }
+        }
+        service.drain_and_stop();
+
+        auto const schedule = fake.states[0]->snapshot().command_schedule;
+        EXPECT_EQ(expected, schedule) << "replay " << replay;
+        EXPECT_EQ(2 * num_events, hits.total_photons());
+    }
+}
+
+//---------------------------------------------------------------------------//
+TEST(OpticalTransportServiceTest, idle_only_admission_requires_one_lane)
+{
+    auto gate = std::make_shared<FakeOpticalLaneGate>();
+    FakeLaneSetup fake{2};
+    fake.configs[0].gate = gate;
+    fake.configs[0].gated_event = 0;
+    Service::Options options;
+    options.num_lanes = 2;
+    options.unresolved_limit = 4;
+    options.staged_bytes_limit = 4;
+    options.num_producers = 1;
+    Service service{options, fake.factory()};
+    {
+        auto token = service.make_producer();
+        token.register_event(0);
+        token.submit_burst(0, 1, 1);
+        if (!gate->wait_until_entered(2s))
+        {
+            gate->release();
+            FAIL() << "fake lane did not enter the deterministic gate";
+        }
+
+        token.register_event(2);
+        auto later_submit = std::async(
+            std::launch::async, [&token] { token.submit_burst(2, 1, 1); });
+        auto const status = later_submit.wait_for(2s);
+        gate->release();
+        ASSERT_EQ(std::future_status::ready, status)
+            << "two-lane submission incorrectly waited for lane idle";
+        EXPECT_NO_THROW(later_submit.get());
+
+        token.close_event(0);
+        token.close_event(2);
+        token.wait_until_complete(0);
+        token.wait_until_complete(2);
+    }
+    service.drain_and_stop();
+}
+
+//---------------------------------------------------------------------------//
+TEST(OpticalTransportServiceTest, idle_only_admission_requires_one_producer)
+{
+    auto gate = std::make_shared<FakeOpticalLaneGate>();
+    FakeLaneSetup fake{1};
+    fake.configs[0].gate = gate;
+    fake.configs[0].gated_event = 0;
+    Service::Options options;
+    options.num_lanes = 1;
+    options.unresolved_limit = 4;
+    options.staged_bytes_limit = 4;
+    options.num_producers = 2;
+    Service service{options, fake.factory()};
+    {
+        auto first = service.make_producer();
+        auto second = service.make_producer();
+        first.register_event(0);
+        first.submit_burst(0, 1, 1);
+        if (!gate->wait_until_entered(2s))
+        {
+            gate->release();
+            FAIL() << "fake lane did not enter the deterministic gate";
+        }
+
+        second.register_event(1);
+        auto later_submit = std::async(
+            std::launch::async, [&second] { second.submit_burst(1, 1, 1); });
+        auto const status = later_submit.wait_for(2s);
+        gate->release();
+        ASSERT_EQ(std::future_status::ready, status)
+            << "two-producer submission incorrectly waited for lane idle";
+        EXPECT_NO_THROW(later_submit.get());
+
+        first.close_event(0);
+        second.close_event(1);
+        first.wait_until_complete(0);
+        second.wait_until_complete(1);
+    }
+    service.drain_and_stop();
+}
+
+//---------------------------------------------------------------------------//
 TEST(OpticalTransportServiceTest, event_backpressure_engages_and_releases)
 {
     FakeLaneSetup fake{1};

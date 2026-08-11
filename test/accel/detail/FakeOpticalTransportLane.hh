@@ -64,11 +64,15 @@ class FakeOpticalLaneGate
  */
 struct FakeOpticalLaneState
 {
+    using CommandRecord = std::pair<int, long>;
+    using CommandSchedule = std::vector<CommandRecord>;
+
     struct Snapshot
     {
         size_type transported_bursts{0};
         size_type closed_events{0};
         std::vector<long> reseeded_events;
+        CommandSchedule command_schedule;
         size_type finalizations{0};
         std::thread::id owner;
     };
@@ -79,6 +83,7 @@ struct FakeOpticalLaneState
         return {transported_bursts,
                 closed_events,
                 reseeded_events,
+                command_schedule,
                 finalizations,
                 owner};
     }
@@ -87,6 +92,7 @@ struct FakeOpticalLaneState
     size_type transported_bursts{0};
     size_type closed_events{0};
     std::vector<long> reseeded_events;
+    CommandSchedule command_schedule;
     size_type finalizations{0};
     std::thread::id owner;
 };
@@ -117,7 +123,8 @@ class FakeOpticalTransportLane final
     detail::OpticalTransportLaneProgress
     transport(detail::OpticalTransportBurst const& burst) final
     {
-        size_type const operation = this->record_call(false);
+        size_type const operation = this->record_call(
+            detail::OpticalTransportLaneCommandType::burst, burst.event);
         if (config_.gate && config_.gated_event == burst.event)
         {
             config_.gate->wait();
@@ -151,7 +158,8 @@ class FakeOpticalTransportLane final
 
     detail::OpticalTransportLaneProgress close_event(long ordinal) final
     {
-        size_type const operation = this->record_call(true);
+        size_type const operation = this->record_call(
+            detail::OpticalTransportLaneCommandType::close, ordinal);
         this->delay(ordinal, operation);
         if (config_.failure_event == ordinal)
         {
@@ -168,6 +176,9 @@ class FakeOpticalTransportLane final
     {
         std::lock_guard<std::mutex> lock{state_->mutex};
         state_->reseeded_events.push_back(event_ordinal);
+        state_->command_schedule.emplace_back(
+            static_cast<int>(detail::OpticalTransportLaneCommandType::reseed),
+            event_ordinal);
     }
 
     void finalize() final
@@ -182,7 +193,8 @@ class FakeOpticalTransportLane final
     }
 
   private:
-    size_type record_call(bool close)
+    size_type
+    record_call(detail::OpticalTransportLaneCommandType type, long ordinal)
     {
         std::lock_guard<std::mutex> lock{state_->mutex};
         auto const this_thread = std::this_thread::get_id();
@@ -195,7 +207,8 @@ class FakeOpticalTransportLane final
             throw std::runtime_error{"fake optical lane changed owner thread"};
         }
 
-        if (close)
+        state_->command_schedule.emplace_back(static_cast<int>(type), ordinal);
+        if (type == detail::OpticalTransportLaneCommandType::close)
         {
             return ++state_->closed_events;
         }

@@ -7,6 +7,7 @@
 //---------------------------------------------------------------------------//
 #pragma once
 
+#include <algorithm>
 #include <functional>
 #include <iterator>
 #include <optional>
@@ -53,6 +54,7 @@ struct OpticalTransportLaneProgress
 {
     size_type total_generated{0};
     std::vector<OpticalTransportHitBatch> hit_batches;
+    size_type admitted_sequence{0};
     bool census_fresh{false};
     std::optional<long> min_live_ordinal;
 };
@@ -74,6 +76,7 @@ struct OpticalTransportLaneCommand
     OpticalTransportLaneCommandType type{
         OpticalTransportLaneCommandType::burst};
     OpticalTransportBurst burst;
+    size_type admission_sequence{0};
 };
 
 //---------------------------------------------------------------------------//
@@ -97,6 +100,7 @@ struct OpticalTransportLaneControl
     Receive receive;  //!< Take available commands; optionally block
     CensusBase census_base;  //!< First unresolved run-global ordinal
     Publish publish;  //!< Return generation, census, and hit progress
+    bool idle_only_admission{false};  //!< Only receive when transport is idle
 };
 
 //---------------------------------------------------------------------------//
@@ -106,7 +110,9 @@ struct OpticalTransportLaneControl
  * Implementations are single-owner: c run executes on the lane thread and
  * never concurrently with another call on the instance. The default runner
  * dispatches commands through c transport and c close_event for synchronous
- * and fake implementations. Finalize runs once after the owner thread joins.
+ * and fake implementations. A command's nonzero admission sequence must be
+ * published only after that command has executed. Finalize runs once after
+ * the owner thread joins.
  */
 class OpticalTransportLaneInterface
 {
@@ -161,6 +167,8 @@ OpticalTransportLaneInterface::run(OpticalTransportLaneControl& control)
             if (command.type == OpticalTransportLaneCommandType::reseed)
             {
                 this->reseed(command.burst.event);
+                combined.admitted_sequence = std::max(
+                    combined.admitted_sequence, command.admission_sequence);
                 continue;
             }
 
@@ -181,6 +189,8 @@ OpticalTransportLaneInterface::run(OpticalTransportLaneControl& control)
                 std::make_move_iterator(current.hit_batches.end()));
             combined.census_fresh = current.census_fresh;
             combined.min_live_ordinal = current.min_live_ordinal;
+            combined.admitted_sequence = std::max(combined.admitted_sequence,
+                                                  command.admission_sequence);
         }
         control.publish(std::move(combined));
     }

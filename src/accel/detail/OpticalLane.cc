@@ -601,9 +601,10 @@ void OpticalLane::run(OpticalTransportLaneControl& control)
 /*!
  * Consumer thread: a persistent transport loop fed by staged bursts.
  *
- * The loop absorbs staged bursts between step iterations, so the drain-out
- * tail of one event's photons transports the next events' instead of
- * idling. When nothing is staged, pending, or alive, the consumer publishes
+ * The loop normally absorbs staged bursts between step iterations, so the
+ * drain-out tail of one event's photons transports the next events' instead
+ * of idling. A deterministic single-producer lane admits only at the idle
+ * boundary. When nothing is staged, pending, or alive, the consumer publishes
  * the drain cursor and parks on the condition variable.
  */
 void OpticalLane::ConsumerLoop(OpticalTransportLaneControl* control)
@@ -667,6 +668,8 @@ void OpticalLane::ConsumerLoop(OpticalTransportLaneControl* control)
     auto counters = state.sync_get_counters();
     size_type published_generated
         = generate_->counters(*state.aux()).accum.num_generated;
+    size_type admitted_sequence{0};
+    size_type published_admission_sequence{0};
     OpticalTransportLaneControl::VecCommand service_commands;
 
     auto publish_service_progress
@@ -675,7 +678,8 @@ void OpticalLane::ConsumerLoop(OpticalTransportLaneControl* control)
               size_type const generated
                   = generate_->counters(*state.aux()).accum.num_generated;
               if (!census_fresh && generated == published_generated
-                  && service_hits.empty())
+                  && service_hits.empty()
+                  && admitted_sequence == published_admission_sequence)
               {
                   return;
               }
@@ -683,11 +687,13 @@ void OpticalLane::ConsumerLoop(OpticalTransportLaneControl* control)
               OpticalTransportLaneProgress progress;
               progress.total_generated = generated;
               progress.hit_batches = std::move(service_hits);
+              progress.admitted_sequence = admitted_sequence;
               progress.census_fresh = census_fresh;
               progress.min_live_ordinal = min_live;
               service_hits.clear();
               service_hit_indices.clear();
               published_generated = generated;
+              published_admission_sequence = admitted_sequence;
               control->publish(std::move(progress));
           };
 
@@ -695,7 +701,8 @@ void OpticalLane::ConsumerLoop(OpticalTransportLaneControl* control)
     {
         while (true)
         {
-            if (control && service_commands.empty())
+            if (control && service_commands.empty()
+                && !control->idle_only_admission)
             {
                 auto const status = control->receive(service_commands, false);
                 if (status == OpticalTransportLaneControl::ReceiveStatus::stop)
@@ -712,10 +719,14 @@ void OpticalLane::ConsumerLoop(OpticalTransportLaneControl* control)
                     if (command.type == OpticalTransportLaneCommandType::reseed)
                     {
                         this->reseed(command.burst.event);
+                        admitted_sequence = std::max(
+                            admitted_sequence, command.admission_sequence);
                         continue;
                     }
                     if (command.type != OpticalTransportLaneCommandType::burst)
                     {
+                        admitted_sequence = std::max(
+                            admitted_sequence, command.admission_sequence);
                         continue;
                     }
 
@@ -738,6 +749,8 @@ void OpticalLane::ConsumerLoop(OpticalTransportLaneControl* control)
                         burst.event % static_cast<long>(optical::event_ring));
                     service_event_ordinals[encoded_event] = burst.event;
                     generate_->append(state, make_span(burst.records));
+                    admitted_sequence = std::max(admitted_sequence,
+                                                 command.admission_sequence);
                     ++absorbed_bursts;
                 }
                 service_commands.clear();
@@ -749,6 +762,7 @@ void OpticalLane::ConsumerLoop(OpticalTransportLaneControl* control)
                     counters = state.sync_get_counters();
                     stall_iters = 0;
                 }
+                publish_service_progress(false, std::nullopt);
             }
             else
             {

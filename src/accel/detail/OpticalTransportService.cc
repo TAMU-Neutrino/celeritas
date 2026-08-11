@@ -83,6 +83,8 @@ struct OpticalTransportService::SharedState
         , delivery_pending(opts.num_lanes)
         , lane_metrics(opts.num_lanes)
         , lane_reseeded(opts.num_lanes)
+        , next_admission_sequence(opts.num_lanes)
+        , admitted_sequence(opts.num_lanes)
         , hit_callback(std::move(hit_callback_input))
         , action_time_callback(std::move(action_time_callback_input))
         , census_base(opts.base_ordinal)
@@ -109,6 +111,8 @@ struct OpticalTransportService::SharedState
     std::vector<std::deque<long>> delivery_pending;
     std::vector<LaneMetrics> lane_metrics;
     std::vector<bool> lane_reseeded;
+    std::vector<size_type> next_admission_sequence;
+    std::vector<size_type> admitted_sequence;
     std::unordered_map<long, EventResult> results;
     std::deque<DeliveryResult> ready_results;
     HitCallback hit_callback;
@@ -133,6 +137,26 @@ struct OpticalTransportService::SharedState
 
 namespace
 {
+//---------------------------------------------------------------------------//
+template<class S>
+bool use_idle_only_admission(S const& state)
+{
+    return state.options.num_lanes == 1 && state.options.num_producers == 1;
+}
+
+//---------------------------------------------------------------------------//
+template<class S>
+size_type assign_admission_sequence(S& state,
+                                    OpticalTransportService::LaneId lane,
+                                    OpticalTransportLaneCommand& command)
+{
+    if (use_idle_only_admission(state))
+    {
+        command.admission_sequence = ++state.next_admission_sequence[*lane];
+    }
+    return command.admission_sequence;
+}
+
 //---------------------------------------------------------------------------//
 template<class C>
 size_type checked_size(C const& container)
@@ -194,6 +218,25 @@ void validate_accepting(S const& state)
     CELER_VALIDATE(!state.draining && !state.stop_requested && !state.stopped,
                    << "optical transport service is no longer accepting "
                       "producer calls");
+}
+
+//---------------------------------------------------------------------------//
+template<class S>
+void wait_for_admission(S& state,
+                        std::unique_lock<std::mutex>& lock,
+                        OpticalTransportService::LaneId lane,
+                        size_type sequence)
+{
+    if (sequence == 0)
+    {
+        return;
+    }
+
+    state.state_cv.wait(lock, [&] {
+        return state.terminal_error || state.stop_requested
+               || state.admitted_sequence[*lane] >= sequence;
+    });
+    validate_accepting(state);
 }
 
 //---------------------------------------------------------------------------//
@@ -309,6 +352,13 @@ void apply_progress(S& state,
                     OpticalTransportService::LaneId lane,
                     OpticalTransportLaneProgress progress)
 {
+    CELER_VALIDATE(
+        progress.admitted_sequence <= state.next_admission_sequence[*lane],
+        << "lane " << lane << " acknowledged admission sequence "
+        << progress.admitted_sequence << " beyond submitted sequence "
+        << state.next_admission_sequence[*lane]);
+    state.admitted_sequence[*lane]
+        = std::max(state.admitted_sequence[*lane], progress.admitted_sequence);
     state.events.record_generation_progress(lane, progress.total_generated);
 
     for (auto& batch : progress.hit_batches)
@@ -643,6 +693,12 @@ auto OpticalTransportService::make_producer() -> ProducerToken
 {
     std::lock_guard<std::mutex> lock{state_->mutex};
     validate_accepting(*state_);
+    CELER_VALIDATE(
+        state_->options.num_producers == 0
+            || state_->active_producers < state_->options.num_producers,
+        << "optical transport service producer count exceeds configured "
+           "topology of "
+        << state_->options.num_producers);
     ++state_->active_producers;
     notify_state(*state_);
     return ProducerToken{state_};
@@ -836,6 +892,7 @@ auto OpticalTransportService::register_event(
     SharedState::EventResult result;
     result.lane = lane;
     result.registered = SharedState::Clock::now();
+    size_type admission_sequence{0};
     try
     {
         if (!state->lane_reseeded[*lane])
@@ -843,6 +900,8 @@ auto OpticalTransportService::register_event(
             OpticalTransportLaneCommand command;
             command.type = OpticalTransportLaneCommandType::reseed;
             command.burst.event = ordinal;
+            admission_sequence
+                = assign_admission_sequence(*state, lane, command);
             state->ingress[*lane].push_back(std::move(command));
             state->lane_reseeded[*lane] = true;
         }
@@ -858,6 +917,7 @@ auto OpticalTransportService::register_event(
     update_maxima(*state);
     notify_state(*state);
     state->work_cv.notify_all();
+    wait_for_admission(*state, lock, lane, admission_sequence);
     return lane;
 }
 
@@ -896,6 +956,8 @@ void OpticalTransportService::submit_burst(
     size_type const size_bytes = burst.size_bytes;
     size_type const num_photons = burst.num_photons;
     command.burst = std::move(burst);
+    size_type const admission_sequence
+        = assign_admission_sequence(*state, lane, command);
     try
     {
         state->ingress[*lane].push_back(std::move(command));
@@ -912,13 +974,14 @@ void OpticalTransportService::submit_burst(
     update_maxima(*state);
     notify_state(*state);
     state->work_cv.notify_all();
+    wait_for_admission(*state, lock, lane, admission_sequence);
 }
 
 //---------------------------------------------------------------------------//
 void OpticalTransportService::close_event(
     std::shared_ptr<SharedState> const& state, long ordinal)
 {
-    std::lock_guard<std::mutex> lock{state->mutex};
+    std::unique_lock<std::mutex> lock{state->mutex};
     validate_accepting(*state);
     state->events.close_event(ordinal);
     LaneId const lane{static_cast<size_type>(
@@ -926,6 +989,8 @@ void OpticalTransportService::close_event(
     OpticalTransportLaneCommand command;
     command.type = OpticalTransportLaneCommandType::close;
     command.burst.event = ordinal;
+    size_type const admission_sequence
+        = assign_admission_sequence(*state, lane, command);
     try
     {
         state->ingress[*lane].push_back(std::move(command));
@@ -937,6 +1002,7 @@ void OpticalTransportService::close_event(
     }
     notify_state(*state);
     state->work_cv.notify_all();
+    wait_for_admission(*state, lock, lane, admission_sequence);
 }
 
 //---------------------------------------------------------------------------//
@@ -1123,6 +1189,7 @@ void OpticalTransportService::release_producer(
 void OpticalTransportService::lane_loop(LaneId lane)
 {
     OpticalTransportLaneControl control;
+    control.idle_only_admission = use_idle_only_admission(*state_);
     control.receive = [this, lane](auto& commands, bool block) {
         std::unique_lock<std::mutex> lock{state_->mutex};
         auto& queue = state_->ingress[*lane];
