@@ -213,6 +213,27 @@ bool OpticalEventTable::is_complete(long ordinal) const
 
 //---------------------------------------------------------------------------//
 /*!
+ * Whether transport is done and no additional hit batch can arrive.
+ */
+bool OpticalEventTable::is_transport_complete(long ordinal) const
+{
+    if (ordinal < 0)
+    {
+        return false;
+    }
+    if (ordinal <= completion_watermark_)
+    {
+        return true;
+    }
+
+    long const first_ordinal = completion_watermark_ + 1;
+    size_type const offset = static_cast<size_type>(ordinal - first_ordinal);
+    return offset < events_.size() && events_[offset]
+           && this->transport_complete(*events_[offset]);
+}
+
+//---------------------------------------------------------------------------//
+/*!
  * Get a registered, unresolved event.
  */
 auto OpticalEventTable::event(long ordinal) -> EventState&
@@ -266,6 +287,19 @@ bool OpticalEventTable::census_clears(EventState const& event_state) const
 
 //---------------------------------------------------------------------------//
 /*!
+ * Whether all non-delivery completion conditions are satisfied.
+ */
+bool OpticalEventTable::transport_complete(EventState const& event_state) const
+{
+    auto const& lane_state = this->lane(event_state.lane);
+    return event_state.closed
+           && event_state.absorbed_bursts == event_state.submitted_bursts
+           && lane_state.generated_photons >= event_state.generation_target
+           && this->census_clears(event_state);
+}
+
+//---------------------------------------------------------------------------//
+/*!
  * Latch completion if an event satisfies all five conditions.
  */
 void OpticalEventTable::update_event(EventState& event_state)
@@ -276,10 +310,7 @@ void OpticalEventTable::update_event(EventState& event_state)
     }
 
     auto const& lane_state = this->lane(event_state.lane);
-    if (event_state.closed
-        && event_state.absorbed_bursts == event_state.submitted_bursts
-        && lane_state.generated_photons >= event_state.generation_target
-        && this->census_clears(event_state)
+    if (this->transport_complete(event_state)
         && lane_state.delivered_through >= event_state.ordinal)
     {
         event_state.complete = true;

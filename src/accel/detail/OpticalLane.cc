@@ -11,6 +11,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
 
 #include "corecel/io/Logger.hh"
 #include "corecel/sys/Device.hh"
@@ -563,6 +564,28 @@ void OpticalLane::finalize()
 
 //---------------------------------------------------------------------------//
 /*!
+ * Run the continuous transport loop on the service-owned lane thread.
+ */
+void OpticalLane::run(OpticalTransportLaneControl& control)
+{
+    CELER_EXPECT(*this);
+    CELER_VALIDATE(!stream_,
+                   << "optical lane cannot mix service and facade streaming");
+    CELER_VALIDATE(control.receive && control.census_base && control.publish,
+                   << "optical service lane is missing a control callback");
+
+#if CELERITAS_CORE_GEO == CELERITAS_CORE_GEO_GEANT4
+    CELER_VALIDATE(celeritas::device(),
+                   << "streaming optical transport requires a device or a "
+                      "non-Geant4 optical geometry: host navigation with "
+                      "the Geant4 backend uses per-thread geometry state");
+#endif
+
+    this->ConsumerLoop(&control);
+}
+
+//---------------------------------------------------------------------------//
+/*!
  * Consumer thread: a persistent transport loop fed by staged bursts.
  *
  * The loop absorbs staged bursts between step iterations, so the drain-out
@@ -570,19 +593,54 @@ void OpticalLane::finalize()
  * idling. When nothing is staged, pending, or alive, the consumer publishes
  * the drain cursor and parks on the condition variable.
  */
-void OpticalLane::ConsumerLoop()
+void OpticalLane::ConsumerLoop(OpticalTransportLaneControl* control)
 {
     // Make the process device current on this thread, as worker threads do
     activate_device_local();
 
-    auto& sx = *stream_;
+    CELER_EXPECT(control || stream_);
+    Streaming* sx = stream_.get();
     auto& state = *state_;
 
-    // Collect hits under the mailbox lock; the producer delivers them
-    state.hit_sink([&sx](Span<optical::DetectorHit const> hits) {
-        std::lock_guard<std::mutex> lock{sx.mutex};
-        sx.hit_mail.insert(sx.hit_mail.end(), hits.begin(), hits.end());
-    });
+    // Service hits are grouped by their full ordinal before publication.
+    // The primary ID carries only the event-ring residue, so remember the
+    // full ordinal for every burst admitted to this lane.
+    std::unordered_map<size_type, long> service_event_ordinals;
+    std::unordered_map<long, size_type> service_hit_indices;
+    std::vector<OpticalTransportHitBatch> service_hits;
+    if (control)
+    {
+        state.hit_sink([&](Span<optical::DetectorHit const> hits) {
+            for (auto const& hit : hits)
+            {
+                size_type const encoded_event = hit.primary.unchecked_get()
+                                                >> optical::event_shift;
+                auto const event = service_event_ordinals.find(encoded_event);
+                CELER_VALIDATE(event != service_event_ordinals.end(),
+                               << "optical lane returned a hit for unknown "
+                                  "event residue "
+                               << encoded_event);
+
+                auto [batch, inserted] = service_hit_indices.emplace(
+                    event->second, service_hits.size());
+                if (inserted)
+                {
+                    OpticalTransportHitBatch result;
+                    result.event = event->second;
+                    service_hits.push_back(std::move(result));
+                }
+                service_hits[batch->second].hits.push_back(hit);
+            }
+        });
+    }
+    else
+    {
+        // Collect hits under the mailbox lock; the producer delivers them
+        state.hit_sink([sx](Span<optical::DetectorHit const> hits) {
+            std::lock_guard<std::mutex> lock{sx->mutex};
+            sx->hit_mail.insert(sx->hit_mail.end(), hits.begin(), hits.end());
+        });
+    }
 
     size_type const max_stall = transport_->params()->sim()->max_step_iters();
 
@@ -594,171 +652,289 @@ void OpticalLane::ConsumerLoop()
     long absorbed_event{-1};
 
     auto counters = state.sync_get_counters();
+    size_type published_generated
+        = generate_->counters(*state.aux()).accum.num_generated;
+    OpticalTransportLaneControl::VecCommand service_commands;
 
-    while (true)
+    auto publish_service_progress
+        = [&](bool census_fresh, std::optional<long> min_live) {
+              CELER_EXPECT(control);
+              size_type const generated
+                  = generate_->counters(*state.aux()).accum.num_generated;
+              if (!census_fresh && generated == published_generated
+                  && service_hits.empty())
+              {
+                  return;
+              }
+
+              OpticalTransportLaneProgress progress;
+              progress.total_generated = generated;
+              progress.hit_batches = std::move(service_hits);
+              progress.census_fresh = census_fresh;
+              progress.min_live_ordinal = min_live;
+              service_hits.clear();
+              service_hit_indices.clear();
+              published_generated = generated;
+              control->publish(std::move(progress));
+          };
+
+    try
     {
-        // Absorb every burst staged so far. Taking work must clear the
-        // idle flag in the same critical section: a barrier that observed
-        // (idle && staged.empty()) between the swap and the transport
-        // would otherwise return while photons are in flight.
-        std::vector<Streaming::Burst> bursts;
+        while (true)
         {
-            std::lock_guard<std::mutex> lock{sx.mutex};
-            bursts.swap(sx.staged);
-            if (!bursts.empty())
+            if (control && service_commands.empty())
             {
-                sx.idle = false;
-            }
-        }
-        if (!bursts.empty())
-        {
-            ++absorb_drains_;
-            absorb_bursts_ += bursts.size();
-            if (bursts.size() > absorb_max_)
-            {
-                absorb_max_ = bursts.size();
-            }
-            for (auto& b : bursts)
-            {
-                metrics_->observe_events(b.registrations);
-                generate_->append(state, make_span(b.records));
-                absorbed_event = b.event;
-                // Cumulative photon total at the end of this event, against
-                // which the generator's progress says when the event's
-                // photons have all been created
-                staged_photons_ += b.photons;
-                staged_.push_back({b.event, staged_photons_});
-            }
-            counters = state.sync_get_counters();
-            stall_iters = 0;
-        }
-
-        if (has_transportable_work(counters))
-        {
-            counters = transport_->step_once(state, iter++, census_base_);
-
-            // How far the generator has got: everything up to here has been
-            // turned into tracks, so an event below it can only still be
-            // represented by a live track or a pending re-emission record --
-            // both of which the census sees.
-            if (!staged_.empty())
-            {
-                size_type const made
-                    = generate_->counters(*state.aux()).accum.num_generated;
-                while (!staged_.empty() && staged_.front().second <= made)
+                auto const status = control->receive(service_commands, false);
+                if (status == OpticalTransportLaneControl::ReceiveStatus::stop)
                 {
-                    fully_generated_ = staged_.front().first;
-                    staged_.pop_front();
+                    break;
                 }
             }
 
-            // Retire events the census says hold no photons anywhere. This
-            // is what makes the cursor advance DURING transport: without it
-            // the only completion signal is the loop going empty, which
-            // under continuous injection may never happen, so nothing could
-            // be released until the end of the run.
-            //
-            // Only THIS iteration's census may be acted on, and only when no
-            // distribution was written during it. A record stored mid-census
-            // by a parent that died in the same iteration is in neither the
-            // generator's fold (which ran before the record existed) nor the
-            // live-track close (the parent is dead). And between censuses the
-            // fully-generated cursor keeps advancing, so a stale minimum
-            // could licence retiring an event whose tracks -- and their
-            // re-emission records -- only came into existence after that
-            // census closed. Waiting costs at most one census period.
-            bool const census_fresh
-                = transport_->census_enabled()
-                  && ((iter - 1) % transport_->census_period() == 0)
-                  && counters.num_dist_written == 0;
-            if (census_fresh
-                && counters.min_live_event_rel < optical::event_ring)
+            if (control)
             {
-                long const oldest_live
-                    = census_base_
-                      + static_cast<long>(counters.min_live_event_rel);
-                // Every event before the oldest live one is finished, but
-                // only up to what has actually been staged and generated:
-                // an event whose photons have not all been created yet has
-                // nothing live to find.
-                long const done = std::min(oldest_live - 1, fully_generated_);
-                if (done > published_event_)
+                size_type absorbed_bursts{0};
+                for (auto& command : service_commands)
                 {
-                    published_event_ = done;
+                    if (command.type != OpticalTransportLaneCommandType::burst)
                     {
-                        std::lock_guard<std::mutex> lock{sx.mutex};
-                        if (done > sx.drained_event)
-                        {
-                            sx.drained_event = done;
-                        }
+                        continue;
                     }
-                    metrics_->retire_through(done);
+
+                    auto& burst = command.burst;
+                    CELER_VALIDATE(!burst.records.empty(),
+                                   << "service burst for event " << burst.event
+                                   << " has no optical distributions");
+                    size_type expected_photons{0};
+                    for (auto const& record : burst.records)
+                    {
+                        expected_photons += record.num_photons;
+                    }
+                    CELER_VALIDATE(expected_photons == burst.num_photons,
+                                   << "service burst for event " << burst.event
+                                   << " has " << burst.num_photons
+                                   << " photons but its distributions contain "
+                                   << expected_photons);
+
+                    size_type const encoded_event = static_cast<size_type>(
+                        burst.event % static_cast<long>(optical::event_ring));
+                    service_event_ordinals[encoded_event] = burst.event;
+                    generate_->append(state, make_span(burst.records));
+                    ++absorbed_bursts;
                 }
-                // Keep the reduction's reference within a ring of everything
-                // in flight
-                census_base_ = published_event_ + 1;
+                service_commands.clear();
+                if (absorbed_bursts > 0)
+                {
+                    ++absorb_drains_;
+                    absorb_bursts_ += absorbed_bursts;
+                    absorb_max_ = std::max(absorb_max_, absorbed_bursts);
+                    counters = state.sync_get_counters();
+                    stall_iters = 0;
+                }
+            }
+            else
+            {
+                // Absorb every burst staged so far. Taking work must clear
+                // the idle flag in the same critical section: a barrier that
+                // observed (idle && staged.empty()) between the swap and the
+                // transport would otherwise return while photons are in
+                // flight.
+                std::vector<Streaming::Burst> bursts;
+                {
+                    std::lock_guard<std::mutex> lock{sx->mutex};
+                    bursts.swap(sx->staged);
+                    if (!bursts.empty())
+                    {
+                        sx->idle = false;
+                    }
+                }
+                if (!bursts.empty())
+                {
+                    ++absorb_drains_;
+                    absorb_bursts_ += bursts.size();
+                    if (bursts.size() > absorb_max_)
+                    {
+                        absorb_max_ = bursts.size();
+                    }
+                    for (auto& b : bursts)
+                    {
+                        metrics_->observe_events(b.registrations);
+                        generate_->append(state, make_span(b.records));
+                        absorbed_event = b.event;
+                        // Cumulative photon total at the end of this event,
+                        // against which the generator's progress says when
+                        // the event's photons have all been created
+                        staged_photons_ += b.photons;
+                        staged_.push_back({b.event, staged_photons_});
+                    }
+                    counters = state.sync_get_counters();
+                    stall_iters = 0;
+                }
             }
 
-            // Mirror the per-flush statistics of the blocking loop
-            state.accum().steps += counters.num_active;
-            ++state.accum().step_iters;
-            state.accum().num_cut += counters.num_cut - last_cut;
-            state.accum().num_errored += counters.num_errored - last_errored;
-            last_cut = counters.num_cut;
-            last_errored = counters.num_errored;
-
-            // The no-progress breaker replaces the per-flush iteration cap:
-            // any change of the in-flight population (deaths, generations,
-            // or injected work) counts as progress
-            size_type inflight = counters.num_pending + counters.num_alive;
-            if (inflight != last_inflight)
+            if (has_transportable_work(counters))
             {
-                stall_iters = 0;
-            }
-            last_inflight = inflight;
+                long const census_origin
+                    = control ? control->census_base()
+                              : static_cast<long>(census_base_);
+                CELER_VALIDATE(census_origin >= 0,
+                               << "invalid negative optical census base "
+                               << census_origin);
+                counters = transport_->step_once(
+                    state, iter++, static_cast<size_type>(census_origin));
 
-            if (CELER_UNLIKELY(++stall_iters >= max_stall))
-            {
-                CELER_LOG_LOCAL(error)
-                    << "Streaming optical transport made no progress over "
-                    << max_stall << " step iterations: aborting "
-                    << counters.num_alive << " alive tracks and "
-                    << counters.num_pending << " queued photons";
-                state.accum().num_cut += counters.num_active
-                                         + counters.num_pending;
-                transport_->params()->gen_reg()->reset(*state.aux());
-                state.reset();
-                counters = state.sync_get_counters();
-                stall_iters = 0;
-                last_inflight = 0;
-                last_cut = 0;
-                last_errored = 0;
-            }
-            continue;
-        }
+                // How far the generator has got: everything up to here has
+                // been turned into tracks, so an event below it can only
+                // still be represented by a live track or a pending
+                // re-emission record -- both of which the census sees.
+                if (!control && !staged_.empty())
+                {
+                    size_type const made
+                        = generate_->counters(*state.aux()).accum.num_generated;
+                    while (!staged_.empty() && staged_.front().second <= made)
+                    {
+                        fully_generated_ = staged_.front().first;
+                        staged_.pop_front();
+                    }
+                }
 
-        // Nothing in flight: publish the drain cursor and park
-        {
-            std::unique_lock<std::mutex> lock{sx.mutex};
-            if (!sx.staged.empty())
-            {
-                // More work arrived while stepping
+                // Only THIS iteration's census may be acted on, and only
+                // when no distribution was written during it. A record
+                // stored mid-census by a parent that died in the same
+                // iteration is in neither the generator's fold nor the
+                // live-track close. Waiting costs at most one census period.
+                bool const census_fresh
+                    = transport_->census_enabled()
+                      && ((iter - 1) % transport_->census_period() == 0)
+                      && counters.num_dist_written == 0;
+                if (control)
+                {
+                    std::optional<long> min_live;
+                    if (census_fresh
+                        && counters.min_live_event_rel < optical::event_ring)
+                    {
+                        min_live
+                            = census_origin
+                              + static_cast<long>(counters.min_live_event_rel);
+                    }
+                    publish_service_progress(census_fresh, min_live);
+                }
+                else if (census_fresh
+                         && counters.min_live_event_rel < optical::event_ring)
+                {
+                    long const oldest_live
+                        = census_base_
+                          + static_cast<long>(counters.min_live_event_rel);
+                    // Every event before the oldest live one is finished,
+                    // but only up to what has actually been staged and
+                    // generated: an event whose photons have not all been
+                    // created yet has nothing live to find.
+                    long const done
+                        = std::min(oldest_live - 1, fully_generated_);
+                    if (done > published_event_)
+                    {
+                        published_event_ = done;
+                        {
+                            std::lock_guard<std::mutex> lock{sx->mutex};
+                            if (done > sx->drained_event)
+                            {
+                                sx->drained_event = done;
+                            }
+                        }
+                        metrics_->retire_through(done);
+                    }
+                    // Keep the reduction's reference within a ring of
+                    // everything in flight
+                    census_base_ = published_event_ + 1;
+                }
+
+                // Mirror the per-flush statistics of the blocking loop
+                state.accum().steps += counters.num_active;
+                ++state.accum().step_iters;
+                state.accum().num_cut += counters.num_cut - last_cut;
+                state.accum().num_errored += counters.num_errored
+                                             - last_errored;
+                last_cut = counters.num_cut;
+                last_errored = counters.num_errored;
+
+                // The no-progress breaker replaces the per-flush iteration
+                // cap: any change of the in-flight population (deaths,
+                // generations, or injected work) counts as progress
+                size_type inflight = counters.num_pending + counters.num_alive;
+                if (inflight != last_inflight)
+                {
+                    stall_iters = 0;
+                }
+                last_inflight = inflight;
+
+                if (CELER_UNLIKELY(++stall_iters >= max_stall))
+                {
+                    CELER_VALIDATE(
+                        !control,
+                        << "service optical transport made no progress over "
+                        << max_stall << " step iterations with "
+                        << counters.num_alive << " alive tracks and "
+                        << counters.num_pending << " queued photons");
+                    CELER_LOG_LOCAL(error)
+                        << "Streaming optical transport made no progress over "
+                        << max_stall << " step iterations: aborting "
+                        << counters.num_alive << " alive tracks and "
+                        << counters.num_pending << " queued photons";
+                    state.accum().num_cut += counters.num_active
+                                             + counters.num_pending;
+                    transport_->params()->gen_reg()->reset(*state.aux());
+                    state.reset();
+                    counters = state.sync_get_counters();
+                    stall_iters = 0;
+                    last_inflight = 0;
+                    last_cut = 0;
+                    last_errored = 0;
+                }
                 continue;
             }
-            sx.drained_event = absorbed_event;
-            metrics_->retire_through(absorbed_event);
-            sx.idle = true;
-            ++state.accum().flushes;
-            sx.cv_host.notify_all();
-            if (sx.stop)
+
+            // Nothing in flight: publish the drain cursor and park
+            if (control)
             {
-                break;
+                ++state.accum().flushes;
+                publish_service_progress(true, std::nullopt);
+                auto const status = control->receive(service_commands, true);
+                if (status == OpticalTransportLaneControl::ReceiveStatus::stop)
+                {
+                    break;
+                }
+                continue;
             }
-            auto const park_start = Instrumentation::Clock::now();
-            sx.cv.wait(lock, [&sx] { return !sx.staged.empty() || sx.stop; });
-            metrics_->record_park(Instrumentation::Clock::now() - park_start);
-            sx.idle = false;
+
+            {
+                std::unique_lock<std::mutex> lock{sx->mutex};
+                if (!sx->staged.empty())
+                {
+                    // More work arrived while stepping
+                    continue;
+                }
+                sx->drained_event = absorbed_event;
+                metrics_->retire_through(absorbed_event);
+                sx->idle = true;
+                ++state.accum().flushes;
+                sx->cv_host.notify_all();
+                if (sx->stop)
+                {
+                    break;
+                }
+                auto const park_start = Instrumentation::Clock::now();
+                sx->cv.wait(lock,
+                            [sx] { return !sx->staged.empty() || sx->stop; });
+                metrics_->record_park(
+                    Instrumentation::Clock::now() - park_start);
+                sx->idle = false;
+            }
         }
+    }
+    catch (...)
+    {
+        state.hit_sink(nullptr);
+        throw;
     }
 
     state.hit_sink(nullptr);

@@ -107,6 +107,9 @@ class OpticalLane final : public OpticalTransportLaneInterface
     // Report an empty census after all preceding lane work has drained
     OpticalTransportLaneProgress close_event(long ordinal) final;
 
+    // Run the continuous transport loop on the service-owned lane thread
+    void run(OpticalTransportLaneControl& control) final;
+
     // Emit this lane's existing transport finalization line
     void finalize() final;
 
@@ -166,7 +169,7 @@ class OpticalLane final : public OpticalTransportLaneInterface
     //// STREAMING HELPERS ////
 
     void StartConsumer();
-    void ConsumerLoop();
+    void ConsumerLoop(OpticalTransportLaneControl* control = nullptr);
     long PumpStreamingImpl();
 };
 

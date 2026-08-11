@@ -7,6 +7,7 @@
 #include "OpticalTransportService.hh"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -19,7 +20,6 @@
 
 #include "corecel/Assert.hh"
 #include "corecel/io/Logger.hh"
-#include "corecel/sys/Device.hh"
 
 namespace celeritas
 {
@@ -30,18 +30,6 @@ struct OpticalTransportService::SharedState
 {
     using Clock = std::chrono::steady_clock;
     using Duration = Clock::duration;
-
-    enum class CommandType
-    {
-        burst,
-        close
-    };
-
-    struct Command
-    {
-        CommandType type{CommandType::burst};
-        OpticalTransportBurst burst;
-    };
 
     struct EventResult
     {
@@ -84,6 +72,7 @@ struct OpticalTransportService::SharedState
         , delivery(opts.num_lanes)
         , lane_metrics(opts.num_lanes)
         , hit_callback(std::move(callback))
+        , census_base(opts.base_ordinal)
     {
         auto const num_lanes = static_cast<long>(delivery.size());
         auto const base_lane = opts.base_ordinal % num_lanes;
@@ -101,15 +90,15 @@ struct OpticalTransportService::SharedState
     std::condition_variable work_cv;
     std::condition_variable state_cv;
     OpticalEventTable events;
-    std::vector<std::deque<Command>> ingress;
+    std::vector<std::deque<OpticalTransportLaneCommand>> ingress;
     std::vector<LaneDelivery> delivery;
     std::vector<LaneMetrics> lane_metrics;
     std::unordered_map<long, EventResult> results;
     HitCallback hit_callback;
     std::exception_ptr terminal_error;
+    std::atomic<long> census_base;
     size_type staged_bytes{0};
     size_type mailbox_hits{0};
-    size_type in_flight{0};
     size_type active_producers{0};
     size_type progress_version{0};
     size_type max_unresolved_events{0};
@@ -200,6 +189,8 @@ void cleanup_completed(S& state)
             ++iter;
         }
     }
+    state.census_base.store(state.events.completion_watermark() + 1,
+                            std::memory_order_relaxed);
 }
 
 //---------------------------------------------------------------------------//
@@ -208,7 +199,7 @@ bool has_pending_burst(S const& state, OpticalTransportService::LaneId lane)
 {
     auto const& queue = state.ingress[*lane];
     return std::any_of(queue.begin(), queue.end(), [](auto const& command) {
-        return command.type == S::CommandType::burst;
+        return command.type == OpticalTransportLaneCommandType::burst;
     });
 }
 
@@ -259,6 +250,14 @@ void apply_progress(S& state,
     if (progress.census_fresh && !has_pending_burst(state, lane))
     {
         state.events.record_census(lane, progress.min_live_ordinal);
+    }
+
+    for (auto& [ordinal, result] : state.results)
+    {
+        if (!result.ready && state.events.is_transport_complete(ordinal))
+        {
+            result.ready = true;
+        }
     }
 
     update_maxima(state);
@@ -786,8 +785,8 @@ void OpticalTransportService::submit_burst(
     state->events.submit_burst(burst.event, burst.num_photons);
     LaneId const lane{static_cast<size_type>(
         burst.event % static_cast<long>(state->options.num_lanes))};
-    SharedState::Command command;
-    command.type = SharedState::CommandType::burst;
+    OpticalTransportLaneCommand command;
+    command.type = OpticalTransportLaneCommandType::burst;
     size_type const size_bytes = burst.size_bytes;
     size_type const num_photons = burst.num_photons;
     command.burst = std::move(burst);
@@ -818,8 +817,8 @@ void OpticalTransportService::close_event(
     state->events.close_event(ordinal);
     LaneId const lane{static_cast<size_type>(
         ordinal % static_cast<long>(state->options.num_lanes))};
-    SharedState::Command command;
-    command.type = SharedState::CommandType::close;
+    OpticalTransportLaneCommand command;
+    command.type = OpticalTransportLaneCommandType::close;
     command.burst.event = ordinal;
     try
     {
@@ -1011,99 +1010,82 @@ void OpticalTransportService::release_producer(
 
 //---------------------------------------------------------------------------//
 /*!
- * Process one lane's ingress queue on its single owner thread.
+ * Run one lane on its single service-owned thread.
  */
 void OpticalTransportService::lane_loop(LaneId lane)
 {
-    // Make the process device current on this service-owned lane thread
-    activate_device_local();
+    OpticalTransportLaneControl control;
+    control.receive = [this, lane](auto& commands, bool block) {
+        std::unique_lock<std::mutex> lock{state_->mutex};
+        auto& queue = state_->ingress[*lane];
+        auto& metrics = state_->lane_metrics[*lane];
 
-    bool command_in_flight{false};
+        std::optional<SharedState::Clock::time_point> park_start;
+        if (block && metrics.started && queue.empty()
+            && !state_->stop_requested)
+        {
+            park_start = SharedState::Clock::now();
+        }
+        if (block)
+        {
+            state_->work_cv.wait(lock, [&] {
+                return state_->stop_requested || !queue.empty();
+            });
+        }
+        if (park_start)
+        {
+            ++metrics.idle_parks;
+            metrics.idle_park_time += SharedState::Clock::now() - *park_start;
+        }
+        if (state_->stop_requested)
+        {
+            return OpticalTransportLaneControl::ReceiveStatus::stop;
+        }
+        if (queue.empty())
+        {
+            return OpticalTransportLaneControl::ReceiveStatus::idle;
+        }
+
+        size_type absorbed_bursts{0};
+        commands.reserve(commands.size() + queue.size());
+        while (!queue.empty())
+        {
+            auto command = std::move(queue.front());
+            queue.pop_front();
+            if (command.type == OpticalTransportLaneCommandType::burst)
+            {
+                CELER_ASSERT(state_->staged_bytes >= command.burst.size_bytes);
+                state_->staged_bytes -= command.burst.size_bytes;
+                ++absorbed_bursts;
+            }
+            commands.push_back(std::move(command));
+        }
+        if (absorbed_bursts > 0)
+        {
+            state_->events.record_bursts_absorbed(lane, absorbed_bursts);
+        }
+        metrics.started = true;
+        notify_state(*state_);
+        return OpticalTransportLaneControl::ReceiveStatus::work;
+    };
+    control.census_base = [state = state_] {
+        return state->census_base.load(std::memory_order_relaxed);
+    };
+    control.publish = [this, lane](OpticalTransportLaneProgress progress) {
+        std::lock_guard<std::mutex> lock{state_->mutex};
+        if (!state_->terminal_error && !state_->stop_requested)
+        {
+            apply_progress(*state_, lane, std::move(progress));
+        }
+    };
+
     try
     {
-        while (true)
-        {
-            SharedState::Command command;
-            {
-                std::unique_lock<std::mutex> lock{state_->mutex};
-                auto& metrics = state_->lane_metrics[*lane];
-                std::optional<SharedState::Clock::time_point> park_start;
-                if (metrics.started && state_->ingress[*lane].empty()
-                    && !state_->stop_requested)
-                {
-                    park_start = SharedState::Clock::now();
-                }
-                state_->work_cv.wait(lock, [&] {
-                    return state_->stop_requested
-                           || !state_->ingress[*lane].empty();
-                });
-                if (park_start)
-                {
-                    ++metrics.idle_parks;
-                    metrics.idle_park_time += SharedState::Clock::now()
-                                              - *park_start;
-                }
-                if (state_->stop_requested)
-                {
-                    return;
-                }
-
-                command = std::move(state_->ingress[*lane].front());
-                state_->ingress[*lane].pop_front();
-                ++state_->in_flight;
-                metrics.started = true;
-                command_in_flight = true;
-                if (command.type == SharedState::CommandType::burst)
-                {
-                    CELER_ASSERT(
-                        state_->staged_bytes >= command.burst.size_bytes);
-                    state_->staged_bytes -= command.burst.size_bytes;
-                    state_->events.record_bursts_absorbed(lane, 1);
-                }
-                notify_state(*state_);
-            }
-
-            OpticalTransportLaneProgress progress;
-            if (command.type == SharedState::CommandType::burst)
-            {
-                progress = lanes_[*lane]->transport(command.burst);
-            }
-            else
-            {
-                progress = lanes_[*lane]->close_event(command.burst.event);
-            }
-
-            std::lock_guard<std::mutex> lock{state_->mutex};
-            CELER_ASSERT(state_->in_flight > 0);
-            --state_->in_flight;
-            command_in_flight = false;
-            if (state_->terminal_error || state_->stop_requested)
-            {
-                return;
-            }
-            apply_progress(*state_, lane, std::move(progress));
-            if (command.type == SharedState::CommandType::close)
-            {
-                auto result = state_->results.find(command.burst.event);
-                CELER_VALIDATE(result != state_->results.end(),
-                               << "closed unregistered optical event "
-                               << command.burst.event);
-                CELER_VALIDATE(!result->second.ready,
-                               << "optical event " << command.burst.event
-                               << " was closed more than once");
-                result->second.ready = true;
-                notify_state(*state_);
-            }
-        }
+        lanes_[*lane]->run(control);
     }
     catch (...)
     {
         std::lock_guard<std::mutex> lock{state_->mutex};
-        if (command_in_flight)
-        {
-            CELER_ASSERT(state_->in_flight > 0);
-            --state_->in_flight;
-        }
         set_terminal_error(*state_, std::current_exception());
     }
 }

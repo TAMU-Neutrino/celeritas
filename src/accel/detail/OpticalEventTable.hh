@@ -67,6 +67,9 @@ class OpticalEventTable
     // Whether an event has satisfied the full completion contract
     bool is_complete(long ordinal) const;
 
+    // Whether transport is done and no additional hits can arrive
+    bool is_transport_complete(long ordinal) const;
+
     //! Highest ordinal for which every earlier event is complete
     long completion_watermark() const { return completion_watermark_; }
 
@@ -114,6 +117,7 @@ class OpticalEventTable
     LaneState& lane(LaneId lane);
     LaneState const& lane(LaneId lane) const;
     bool census_clears(EventState const& event) const;
+    bool transport_complete(EventState const& event) const;
     void update_event(EventState& event);
     void update_lane(LaneId lane);
     void advance_watermark();

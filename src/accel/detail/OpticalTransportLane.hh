@@ -7,7 +7,10 @@
 //---------------------------------------------------------------------------//
 #pragma once
 
+#include <functional>
+#include <iterator>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include "corecel/Types.hh"
@@ -42,7 +45,7 @@ struct OpticalTransportHitBatch
 
 //---------------------------------------------------------------------------//
 /*!
- * Progress returned by one host-side lane operation.
+ * Generation, census, and hit progress published by a host-side lane.
  */
 struct OpticalTransportLaneProgress
 {
@@ -53,12 +56,54 @@ struct OpticalTransportLaneProgress
 };
 
 //---------------------------------------------------------------------------//
+enum class OpticalTransportLaneCommandType
+{
+    burst,
+    close
+};
+
+//---------------------------------------------------------------------------//
+/*!
+ * One service command passed to a lane runner.
+ */
+struct OpticalTransportLaneCommand
+{
+    OpticalTransportLaneCommandType type{
+        OpticalTransportLaneCommandType::burst};
+    OpticalTransportBurst burst;
+};
+
+//---------------------------------------------------------------------------//
+/*!
+ * Service callbacks used by a lane's single-owner run loop.
+ */
+struct OpticalTransportLaneControl
+{
+    enum class ReceiveStatus
+    {
+        idle,
+        work,
+        stop
+    };
+
+    using VecCommand = std::vector<OpticalTransportLaneCommand>;
+    using Receive = std::function<ReceiveStatus(VecCommand&, bool)>;
+    using CensusBase = std::function<long()>;
+    using Publish = std::function<void(OpticalTransportLaneProgress)>;
+
+    Receive receive;  //!< Take available commands; optionally block
+    CensusBase census_base;  //!< First unresolved run-global ordinal
+    Publish publish;  //!< Return generation, census, and hit progress
+};
+
+//---------------------------------------------------------------------------//
 /*!
  * Interface driven by one service-owned host thread.
  *
- * Implementations are single-owner: transport and close calls for one
- * instance are made from the same lane thread and never concurrently.
- * Finalize runs once after that owner thread has joined.
+ * Implementations are single-owner: c run executes on the lane thread and
+ * never concurrently with another call on the instance. The default runner
+ * dispatches commands through c transport and c close_event for synchronous
+ * and fake implementations. Finalize runs once after the owner thread joins.
  */
 class OpticalTransportLaneInterface
 {
@@ -72,9 +117,57 @@ class OpticalTransportLaneInterface
     // Finish an event after all of its bursts have been submitted
     virtual OpticalTransportLaneProgress close_event(long ordinal) = 0;
 
+    // Run until the service asks this single-owner lane to stop
+    virtual void run(OpticalTransportLaneControl&);
+
     // Emit lane-local finalization data after the owner thread has stopped
     virtual void finalize() {}
 };
+
+//---------------------------------------------------------------------------//
+/*!
+ * Run the synchronous command adapter used by simple and fake lanes.
+ */
+inline void
+OpticalTransportLaneInterface::run(OpticalTransportLaneControl& control)
+{
+    while (true)
+    {
+        OpticalTransportLaneControl::VecCommand commands;
+        auto const status = control.receive(commands, true);
+        if (status == OpticalTransportLaneControl::ReceiveStatus::stop)
+        {
+            return;
+        }
+        if (status == OpticalTransportLaneControl::ReceiveStatus::idle)
+        {
+            continue;
+        }
+
+        OpticalTransportLaneProgress combined;
+        for (auto const& command : commands)
+        {
+            OpticalTransportLaneProgress current;
+            if (command.type == OpticalTransportLaneCommandType::burst)
+            {
+                current = this->transport(command.burst);
+            }
+            else
+            {
+                current = this->close_event(command.burst.event);
+            }
+
+            combined.total_generated = current.total_generated;
+            combined.hit_batches.insert(
+                combined.hit_batches.end(),
+                std::make_move_iterator(current.hit_batches.begin()),
+                std::make_move_iterator(current.hit_batches.end()));
+            combined.census_fresh = current.census_fresh;
+            combined.min_live_ordinal = current.min_live_ordinal;
+        }
+        control.publish(std::move(combined));
+    }
+}
 
 //---------------------------------------------------------------------------//
 }  // namespace detail

@@ -45,6 +45,7 @@ TEST(OpticalEventTableTest, requires_all_completion_conditions)
     events.record_generation_progress(lane, 10);
     EXPECT_FALSE(events.is_complete(0));
     events.record_census(lane, std::nullopt);
+    EXPECT_TRUE(events.is_transport_complete(0));
     EXPECT_FALSE(events.is_complete(0));
     events.record_delivered_through(lane, 0);
     EXPECT_TRUE(events.is_complete(0));
@@ -64,6 +65,7 @@ TEST(OpticalEventTableTest, auto_flush_requires_close)
     events.record_delivered_through(lane, 0);
 
     // All transport work so far is done, but the producer is still open
+    EXPECT_FALSE(events.is_transport_complete(0));
     EXPECT_FALSE(events.is_complete(0));
 
     // A later auto-flush burst must invalidate the would-be completion
@@ -75,6 +77,7 @@ TEST(OpticalEventTableTest, auto_flush_requires_close)
 
     // Only a census after the final append can complete the event
     events.record_census(lane, std::nullopt);
+    EXPECT_TRUE(events.is_transport_complete(0));
     EXPECT_TRUE(events.is_complete(0));
 }
 
