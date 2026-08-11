@@ -555,6 +555,17 @@ auto OpticalLane::close_event(long) -> OpticalTransportLaneProgress
 
 //---------------------------------------------------------------------------//
 /*!
+ * Reseed lane-local track slots before the first service event.
+ */
+void OpticalLane::reseed(long event_ordinal)
+{
+    CELER_EXPECT(event_ordinal >= 0);
+    state_->reseed(transport_->params()->rng(),
+                   id_cast<UniqueEventId>(event_ordinal));
+}
+
+//---------------------------------------------------------------------------//
+/*!
  * Emit lane-local transport finalization data.
  */
 void OpticalLane::finalize()
@@ -698,6 +709,11 @@ void OpticalLane::ConsumerLoop(OpticalTransportLaneControl* control)
                 size_type absorbed_bursts{0};
                 for (auto& command : service_commands)
                 {
+                    if (command.type == OpticalTransportLaneCommandType::reseed)
+                    {
+                        this->reseed(command.burst.event);
+                        continue;
+                    }
                     if (command.type != OpticalTransportLaneCommandType::burst)
                     {
                         continue;

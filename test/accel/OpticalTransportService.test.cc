@@ -345,6 +345,10 @@ TEST(OpticalTransportServiceTest, nonzero_base_ordinal)
     EXPECT_EQ(101, service.statistics().completion_watermark);
     EXPECT_EQ(1, hits.photons(100));
     EXPECT_EQ(1, hits.photons(101));
+    EXPECT_VEC_EQ((std::vector<long>{100}),
+                  fake.states[0]->snapshot().reseeded_events);
+    EXPECT_VEC_EQ((std::vector<long>{101}),
+                  fake.states[1]->snapshot().reseeded_events);
 }
 
 //---------------------------------------------------------------------------//

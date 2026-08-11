@@ -73,6 +73,7 @@ struct OpticalTransportService::SharedState
         , ingress(opts.num_lanes)
         , delivery(opts.num_lanes)
         , lane_metrics(opts.num_lanes)
+        , lane_reseeded(opts.num_lanes)
         , hit_callback(std::move(hit_callback_input))
         , action_time_callback(std::move(action_time_callback_input))
         , census_base(opts.base_ordinal)
@@ -96,6 +97,7 @@ struct OpticalTransportService::SharedState
     std::vector<std::deque<OpticalTransportLaneCommand>> ingress;
     std::vector<LaneDelivery> delivery;
     std::vector<LaneMetrics> lane_metrics;
+    std::vector<bool> lane_reseeded;
     std::unordered_map<long, EventResult> results;
     HitCallback hit_callback;
     ActionTimeCallback action_time_callback;
@@ -763,6 +765,14 @@ auto OpticalTransportService::register_event(
     result.registered = SharedState::Clock::now();
     try
     {
+        if (!state->lane_reseeded[*lane])
+        {
+            OpticalTransportLaneCommand command;
+            command.type = OpticalTransportLaneCommandType::reseed;
+            command.burst.event = ordinal;
+            state->ingress[*lane].push_back(std::move(command));
+            state->lane_reseeded[*lane] = true;
+        }
         auto inserted = state->results.emplace(ordinal, std::move(result));
         CELER_ASSERT(inserted.second);
     }
@@ -774,6 +784,7 @@ auto OpticalTransportService::register_event(
     ++state->lane_metrics[*lane].registered_events;
     update_maxima(*state);
     notify_state(*state);
+    state->work_cv.notify_all();
     return lane;
 }
 

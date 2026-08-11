@@ -107,6 +107,9 @@ class OpticalLane final : public OpticalTransportLaneInterface
     // Report an empty census after all preceding lane work has drained
     OpticalTransportLaneProgress close_event(long ordinal) final;
 
+    // Reseed lane-local track slots before the first service event
+    void reseed(long event_ordinal) final;
+
     // Run the continuous transport loop on the service-owned lane thread
     void run(OpticalTransportLaneControl& control) final;
 

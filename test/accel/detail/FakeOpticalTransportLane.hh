@@ -14,6 +14,7 @@
 #include <stdexcept>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include "celeritas/optical/Types.hh"
 #include "accel/detail/OpticalTransportLane.hh"
@@ -67,6 +68,7 @@ struct FakeOpticalLaneState
     {
         size_type transported_bursts{0};
         size_type closed_events{0};
+        std::vector<long> reseeded_events;
         size_type finalizations{0};
         std::thread::id owner;
     };
@@ -74,12 +76,17 @@ struct FakeOpticalLaneState
     Snapshot snapshot() const
     {
         std::lock_guard<std::mutex> lock{mutex};
-        return {transported_bursts, closed_events, finalizations, owner};
+        return {transported_bursts,
+                closed_events,
+                reseeded_events,
+                finalizations,
+                owner};
     }
 
     mutable std::mutex mutex;
     size_type transported_bursts{0};
     size_type closed_events{0};
+    std::vector<long> reseeded_events;
     size_type finalizations{0};
     std::thread::id owner;
 };
@@ -155,6 +162,12 @@ class FakeOpticalTransportLane final
         result.total_generated = total_generated_;
         result.census_fresh = true;
         return result;
+    }
+
+    void reseed(long event_ordinal) final
+    {
+        std::lock_guard<std::mutex> lock{state_->mutex};
+        state_->reseeded_events.push_back(event_ordinal);
     }
 
     void finalize() final

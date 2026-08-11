@@ -60,6 +60,7 @@ struct OpticalTransportLaneProgress
 //---------------------------------------------------------------------------//
 enum class OpticalTransportLaneCommandType
 {
+    reseed,
     burst,
     close
 };
@@ -121,6 +122,9 @@ class OpticalTransportLaneInterface
     // Finish an event after all of its bursts have been submitted
     virtual OpticalTransportLaneProgress close_event(long ordinal) = 0;
 
+    // Reseed the lane before its first event is submitted
+    virtual void reseed(long) {}
+
     // Run until the service asks this single-owner lane to stop
     virtual void run(OpticalTransportLaneControl&);
 
@@ -154,6 +158,12 @@ OpticalTransportLaneInterface::run(OpticalTransportLaneControl& control)
         OpticalTransportLaneProgress combined;
         for (auto const& command : commands)
         {
+            if (command.type == OpticalTransportLaneCommandType::reseed)
+            {
+                this->reseed(command.burst.event);
+                continue;
+            }
+
             OpticalTransportLaneProgress current;
             if (command.type == OpticalTransportLaneCommandType::burst)
             {
