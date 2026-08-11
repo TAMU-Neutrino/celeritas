@@ -115,6 +115,16 @@ struct OpticalTransportService::SharedState
 namespace
 {
 //---------------------------------------------------------------------------//
+template<class C>
+size_type checked_size(C const& container)
+{
+    CELER_VALIDATE(container.size() <= std::numeric_limits<size_type>::max(),
+                   << "host container size " << container.size()
+                   << " exceeds the configured Celeritas size type");
+    return static_cast<size_type>(container.size());
+}
+
+//---------------------------------------------------------------------------//
 template<class S>
 void notify_state(S& state)
 {
@@ -211,8 +221,8 @@ void update_maxima(S& state)
                                            state.events.unresolved_count());
     state.max_staged_bytes
         = std::max(state.max_staged_bytes, state.staged_bytes);
-    state.max_resident_events
-        = std::max(state.max_resident_events, state.results.size());
+    state.max_resident_events = std::max<size_type>(
+        state.max_resident_events, checked_size(state.results));
     state.max_mailbox_hits
         = std::max(state.max_mailbox_hits, state.mailbox_hits);
 }
@@ -880,8 +890,10 @@ auto OpticalTransportService::pump(
         state->mailbox_hits -= hits.size();
         CELER_ASSERT(metrics.mailbox_hits >= hits.size());
         metrics.mailbox_hits -= hits.size();
-        metrics.pump_hits_total += hits.size();
-        metrics.pump_hits_max = std::max(metrics.pump_hits_max, hits.size());
+        size_type const num_hits = checked_size(hits);
+        metrics.pump_hits_total += num_hits;
+        metrics.pump_hits_max
+            = std::max<size_type>(metrics.pump_hits_max, num_hits);
         notify_state(*state);
     }
 
