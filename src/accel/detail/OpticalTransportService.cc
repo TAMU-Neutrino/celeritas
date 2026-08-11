@@ -37,8 +37,16 @@ struct OpticalTransportService::SharedState
         std::vector<optical::DetectorHit> hits;
         Clock::time_point registered;
         bool ready{false};
-        bool pumping{false};
+        bool delivery_queued{false};
         bool delivered{false};
+    };
+
+    struct DeliveryResult
+    {
+        long ordinal{-1};
+        LaneId lane;
+        std::vector<optical::DetectorHit> hits;
+        bool ready{false};
     };
 
     struct LaneDelivery
@@ -72,6 +80,7 @@ struct OpticalTransportService::SharedState
         , events(opts.num_lanes, opts.unresolved_limit, opts.base_ordinal)
         , ingress(opts.num_lanes)
         , delivery(opts.num_lanes)
+        , delivery_pending(opts.num_lanes)
         , lane_metrics(opts.num_lanes)
         , lane_reseeded(opts.num_lanes)
         , hit_callback(std::move(hit_callback_input))
@@ -90,15 +99,18 @@ struct OpticalTransportService::SharedState
 
     Options options;
     mutable std::mutex mutex;
+    std::mutex results_mutex;
     std::mutex pump_mutex;
     std::condition_variable work_cv;
     std::condition_variable state_cv;
     OpticalEventTable events;
     std::vector<std::deque<OpticalTransportLaneCommand>> ingress;
     std::vector<LaneDelivery> delivery;
+    std::vector<std::deque<long>> delivery_pending;
     std::vector<LaneMetrics> lane_metrics;
     std::vector<bool> lane_reseeded;
     std::unordered_map<long, EventResult> results;
+    std::deque<DeliveryResult> ready_results;
     HitCallback hit_callback;
     ActionTimeCallback action_time_callback;
     std::exception_ptr terminal_error;
@@ -113,6 +125,7 @@ struct OpticalTransportService::SharedState
     size_type max_mailbox_hits{0};
     size_type event_admission_waits{0};
     size_type staged_bytes_waits{0};
+    size_type next_pump_lane{0};
     bool draining{false};
     bool stop_requested{false};
     bool stopped{false};
@@ -192,7 +205,7 @@ void cleanup_completed(S& state)
         if (state.events.is_complete(iter->first))
         {
             CELER_ASSERT(iter->second.hits.empty());
-            CELER_ASSERT(!iter->second.pumping);
+            CELER_ASSERT(!iter->second.delivery_queued);
             auto& metrics = state.lane_metrics[*iter->second.lane];
             auto const elapsed = S::Clock::now() - iter->second.registered;
             metrics.retirement_time += elapsed;
@@ -207,6 +220,63 @@ void cleanup_completed(S& state)
     }
     state.census_base.store(state.events.completion_watermark() + 1,
                             std::memory_order_relaxed);
+}
+
+//---------------------------------------------------------------------------//
+template<class S>
+void queue_delivery(S& state, long ordinal, typename S::EventResult& result)
+{
+    if (!result.delivery_queued)
+    {
+        state.delivery_pending[*result.lane].push_back(ordinal);
+        result.delivery_queued = true;
+    }
+}
+
+//---------------------------------------------------------------------------//
+template<class S>
+auto collect_lane_results(S& state, OpticalTransportService::LaneId lane)
+    -> std::vector<typename S::DeliveryResult>
+{
+    auto& metrics = state.lane_metrics[*lane];
+    ++metrics.pump_count;
+
+    std::vector<typename S::DeliveryResult> collected;
+    auto& pending = state.delivery_pending[*lane];
+    collected.reserve(pending.size());
+    while (!pending.empty())
+    {
+        long const ordinal = pending.front();
+        pending.pop_front();
+
+        auto result = state.results.find(ordinal);
+        CELER_ASSERT(result != state.results.end());
+        CELER_ASSERT(result->second.lane == lane);
+        CELER_ASSERT(result->second.delivery_queued);
+        result->second.delivery_queued = false;
+
+        typename S::DeliveryResult delivery;
+        delivery.ordinal = ordinal;
+        delivery.lane = lane;
+        delivery.hits = std::move(result->second.hits);
+        delivery.ready = result->second.ready;
+        CELER_ASSERT(!delivery.hits.empty() || delivery.ready);
+
+        CELER_ASSERT(state.mailbox_hits >= delivery.hits.size());
+        state.mailbox_hits -= delivery.hits.size();
+        CELER_ASSERT(metrics.mailbox_hits >= delivery.hits.size());
+        metrics.mailbox_hits -= delivery.hits.size();
+        size_type const num_hits = checked_size(delivery.hits);
+        metrics.pump_hits_total += num_hits;
+        metrics.pump_hits_max
+            = std::max<size_type>(metrics.pump_hits_max, num_hits);
+        collected.push_back(std::move(delivery));
+    }
+    if (!collected.empty())
+    {
+        notify_state(state);
+    }
+    return collected;
 }
 
 //---------------------------------------------------------------------------//
@@ -252,6 +322,7 @@ void apply_progress(S& state,
                        << "lane " << lane << " returned a hit for event "
                        << batch.event << " assigned to lane "
                        << result->second.lane);
+        bool const has_hits = !batch.hits.empty();
         state.mailbox_hits += batch.hits.size();
         auto& metrics = state.lane_metrics[*lane];
         metrics.mailbox_hits += batch.hits.size();
@@ -260,6 +331,10 @@ void apply_progress(S& state,
         result->second.hits.insert(result->second.hits.end(),
                                    std::make_move_iterator(batch.hits.begin()),
                                    std::make_move_iterator(batch.hits.end()));
+        if (has_hits)
+        {
+            queue_delivery(state, batch.event, result->second);
+        }
     }
 
     // A report older than an already queued append is not a fresh census
@@ -273,6 +348,7 @@ void apply_progress(S& state,
         if (!result.ready && state.events.is_transport_complete(ordinal))
         {
             result.ready = true;
+            queue_delivery(state, ordinal, result);
         }
     }
 
@@ -592,6 +668,15 @@ auto OpticalTransportService::try_pump(long ordinal) -> PumpResult
 
 //---------------------------------------------------------------------------//
 /*!
+ * Try one lane and deliver results already ready for callbacks.
+ */
+auto OpticalTransportService::try_pump() -> PumpResult
+{
+    return OpticalTransportService::pump(state_, std::nullopt, true);
+}
+
+//---------------------------------------------------------------------------//
+/*!
  * Query per-event completion.
  */
 bool OpticalTransportService::is_complete(long ordinal) const
@@ -634,7 +719,15 @@ void OpticalTransportService::drain_and_stop()
     {
         while (true)
         {
-            std::vector<long> ready;
+            bool pumped{false};
+            for (size_type i = 0; i < state_->options.num_lanes; ++i)
+            {
+                pumped = OpticalTransportService::pump(
+                             state_, std::nullopt, false)
+                             .pumped
+                         || pumped;
+            }
+
             {
                 std::unique_lock<std::mutex> lock{state_->mutex};
                 throw_if_failed(*state_);
@@ -643,30 +736,21 @@ void OpticalTransportService::drain_and_stop()
                     break;
                 }
 
-                for (auto const& [ordinal, result] : state_->results)
+                bool pending_delivery = std::any_of(
+                    state_->delivery_pending.begin(),
+                    state_->delivery_pending.end(),
+                    [](auto const& pending) { return !pending.empty(); });
+                if (pumped || pending_delivery)
                 {
-                    if (!result.delivered && !result.pumping
-                        && (result.ready || !result.hits.empty()))
-                    {
-                        ready.push_back(ordinal);
-                    }
-                }
-
-                if (ready.empty())
-                {
-                    size_type const version = state_->progress_version;
-                    state_->state_cv.wait(lock, [&] {
-                        return state_->terminal_error
-                               || state_->events.unresolved_count() == 0
-                               || state_->progress_version != version;
-                    });
                     continue;
                 }
-            }
 
-            for (long ordinal : ready)
-            {
-                OpticalTransportService::pump(state_, ordinal, false);
+                size_type const version = state_->progress_version;
+                state_->state_cv.wait(lock, [&] {
+                    return state_->terminal_error
+                           || state_->events.unresolved_count() == 0
+                           || state_->progress_version != version;
+                });
             }
         }
     }
@@ -713,6 +797,10 @@ auto OpticalTransportService::statistics() const -> Statistics
     result.max_mailbox_hits = state_->max_mailbox_hits;
     result.event_admission_waits = state_->event_admission_waits;
     result.staged_bytes_waits = state_->staged_bytes_waits;
+    for (auto const& metrics : state_->lane_metrics)
+    {
+        result.pump_calls += metrics.pump_count;
+    }
     result.active_producers = state_->active_producers;
     result.completion_watermark = state_->events.completion_watermark();
     result.stopped = state_->stopped;
@@ -867,9 +955,9 @@ void OpticalTransportService::close_event(
 }
 
 //---------------------------------------------------------------------------//
-auto OpticalTransportService::pump(
-    std::shared_ptr<SharedState> const& state, long ordinal, bool try_lock)
-    -> PumpResult
+auto OpticalTransportService::pump(std::shared_ptr<SharedState> const& state,
+                                   std::optional<long> ordinal,
+                                   bool try_lock) -> PumpResult
 {
     std::unique_lock<std::mutex> pump_lock{state->pump_mutex, std::defer_lock};
     if (try_lock)
@@ -884,76 +972,95 @@ auto OpticalTransportService::pump(
         pump_lock.lock();
     }
 
-    std::vector<optical::DetectorHit> hits;
     LaneId lane;
+    std::vector<SharedState::DeliveryResult> collected;
     {
         std::lock_guard<std::mutex> lock{state->mutex};
         throw_if_failed(*state);
-        if (state->events.is_complete(ordinal))
+        if (ordinal && state->events.is_complete(*ordinal))
         {
             return {false, true, false};
         }
 
-        auto result = state->results.find(ordinal);
-        CELER_VALIDATE(result != state->results.end(),
-                       << "optical event " << ordinal << " is not registered");
-        lane = result->second.lane;
-        auto& metrics = state->lane_metrics[*lane];
-        ++metrics.pump_count;
-        if (result->second.delivered
-            || (result->second.hits.empty() && !result->second.ready))
+        if (ordinal)
         {
-            return {false, false, false};
+            auto result = state->results.find(*ordinal);
+            CELER_VALIDATE(
+                result != state->results.end(),
+                << "optical event " << *ordinal << " is not registered");
+            lane = result->second.lane;
         }
-
-        CELER_ASSERT(!result->second.pumping);
-        result->second.pumping = true;
-        hits.swap(result->second.hits);
-        CELER_ASSERT(state->mailbox_hits >= hits.size());
-        state->mailbox_hits -= hits.size();
-        CELER_ASSERT(metrics.mailbox_hits >= hits.size());
-        metrics.mailbox_hits -= hits.size();
-        size_type const num_hits = checked_size(hits);
-        metrics.pump_hits_total += num_hits;
-        metrics.pump_hits_max
-            = std::max<size_type>(metrics.pump_hits_max, num_hits);
-        notify_state(*state);
+        else
+        {
+            lane = LaneId{state->next_pump_lane};
+            state->next_pump_lane = (state->next_pump_lane + 1)
+                                    % state->options.num_lanes;
+        }
+        collected = collect_lane_results(*state, lane);
     }
 
-    try
+    if (!collected.empty())
     {
-        if (state->hit_callback)
+        std::lock_guard<std::mutex> lock{state->results_mutex};
+        for (auto& result : collected)
         {
-            state->hit_callback(ordinal, hits);
+            state->ready_results.push_back(std::move(result));
         }
     }
-    catch (...)
+
+    bool pumped{false};
+    std::vector<std::pair<LaneId, long>> delivered;
+    while (true)
+    {
+        SharedState::DeliveryResult result;
+        {
+            std::lock_guard<std::mutex> lock{state->results_mutex};
+            if (state->ready_results.empty())
+            {
+                break;
+            }
+            result = std::move(state->ready_results.front());
+            state->ready_results.pop_front();
+        }
+
+        try
+        {
+            if (state->hit_callback)
+            {
+                state->hit_callback(result.ordinal, result.hits);
+            }
+        }
+        catch (...)
+        {
+            std::lock_guard<std::mutex> lock{state->mutex};
+            set_terminal_error(*state, std::current_exception());
+            throw;
+        }
+        pumped = true;
+        if (result.ready)
+        {
+            delivered.emplace_back(result.lane, result.ordinal);
+        }
+    }
+
+    bool complete{false};
+    if (!delivered.empty() || ordinal)
     {
         std::lock_guard<std::mutex> lock{state->mutex};
-        auto result = state->results.find(ordinal);
-        if (result != state->results.end())
+        throw_if_failed(*state);
+        for (auto const& [delivered_lane, delivered_ordinal] : delivered)
         {
-            result->second.pumping = false;
+            auto result = state->results.find(delivered_ordinal);
+            CELER_ASSERT(result != state->results.end());
+            result->second.delivered = true;
+            advance_delivery(*state, delivered_lane, delivered_ordinal);
         }
-        set_terminal_error(*state, std::current_exception());
-        throw;
+        if (ordinal)
+        {
+            complete = state->events.is_complete(*ordinal);
+        }
     }
-
-    std::lock_guard<std::mutex> lock{state->mutex};
-    throw_if_failed(*state);
-    auto result = state->results.find(ordinal);
-    CELER_ASSERT(result != state->results.end());
-    result->second.pumping = false;
-    if (result->second.ready && result->second.hits.empty())
-    {
-        result->second.delivered = true;
-        advance_delivery(*state, lane, ordinal);
-    }
-    else
-    {
-        notify_state(*state);
-    }
-    return {true, state->events.is_complete(ordinal), false};
+    return {pumped, complete, false};
 }
 
 //---------------------------------------------------------------------------//
@@ -976,7 +1083,6 @@ void OpticalTransportService::wait_until_complete(
             return;
         }
 
-        std::vector<long> ready;
         std::unique_lock<std::mutex> lock{state->mutex};
         throw_if_failed(*state);
         if (state->events.is_complete(ordinal))
@@ -985,29 +1091,11 @@ void OpticalTransportService::wait_until_complete(
         }
         auto const target = state->results.find(ordinal);
         CELER_ASSERT(target != state->results.end());
-        if (!target->second.delivered && !target->second.pumping
-            && (target->second.ready || !target->second.hits.empty()))
+        auto const& pending = state->delivery_pending[*target->second.lane];
+        if (!pending.empty())
         {
             // Progress may arrive after the pump attempt but before this
             // lock. Retry instead of sleeping past that notification.
-            lock.unlock();
-            continue;
-        }
-        for (auto const& [ready_ordinal, result] : state->results)
-        {
-            if (ready_ordinal != ordinal && !result.delivered
-                && !result.pumping && (result.ready || !result.hits.empty()))
-            {
-                ready.push_back(ready_ordinal);
-            }
-        }
-        if (!ready.empty())
-        {
-            lock.unlock();
-            for (long ready_ordinal : ready)
-            {
-                OpticalTransportService::pump(state, ready_ordinal, false);
-            }
             continue;
         }
         size_type const version = state->progress_version;

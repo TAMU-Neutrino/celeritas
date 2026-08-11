@@ -479,6 +479,37 @@ TEST(OpticalTransportServiceTest, try_pump_reports_contention)
 }
 
 //---------------------------------------------------------------------------//
+TEST(OpticalTransportServiceTest, facade_pump_attempts_one_lane)
+{
+    constexpr long num_events = 32;
+    FakeLaneSetup fake{2};
+    Service service{{2, num_events, num_events}, fake.factory()};
+    {
+        auto token = service.make_producer();
+        for (long ordinal = 0; ordinal < num_events; ++ordinal)
+        {
+            token.register_event(ordinal);
+        }
+
+        EXPECT_EQ(0, service.statistics().pump_calls);
+        EXPECT_FALSE(service.try_pump().contended);
+        EXPECT_EQ(1, service.statistics().pump_calls);
+        EXPECT_FALSE(service.try_pump().contended);
+        EXPECT_EQ(2, service.statistics().pump_calls);
+
+        for (long ordinal = 0; ordinal < num_events; ++ordinal)
+        {
+            token.close_event(ordinal);
+        }
+        for (long ordinal = 0; ordinal < num_events; ++ordinal)
+        {
+            token.wait_until_complete(ordinal);
+        }
+    }
+    service.drain_and_stop();
+}
+
+//---------------------------------------------------------------------------//
 TEST(OpticalTransportServiceTest, blocking_wait_pumps_lane_predecessors)
 {
     FakeLaneSetup fake{1};

@@ -670,22 +670,21 @@ long LocalOpticalGenOffload::PumpSharedEvents(bool blocking)
     CELER_EXPECT(this->SharedQueueEnabled());
     auto& shared = *shared_state_;
 
-    std::deque<long> events;
+    if (blocking)
     {
-        std::lock_guard<std::mutex> lock{shared.mutex};
-        events = shared.events;
-    }
-
-    for (long ordinal : events)
-    {
-        if (blocking)
+        std::deque<long> events;
+        {
+            std::lock_guard<std::mutex> lock{shared.mutex};
+            events = shared.events;
+        }
+        for (long ordinal : events)
         {
             shared.service->wait_until_complete(ordinal);
         }
-        else if (shared.service->try_pump(ordinal).contended)
-        {
-            return -1;
-        }
+    }
+    else if (shared.service->try_pump().contended)
+    {
+        return -1;
     }
 
     std::lock_guard<std::mutex> lock{shared.mutex};

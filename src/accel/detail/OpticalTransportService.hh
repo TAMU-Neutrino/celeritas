@@ -9,6 +9,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <unordered_set>
 #include <vector>
@@ -76,6 +77,7 @@ class OpticalTransportService
         size_type max_mailbox_hits{0};
         size_type event_admission_waits{0};
         size_type staged_bytes_waits{0};
+        size_type pump_calls{0};
         size_type active_producers{0};
         long completion_watermark{-1};
         bool stopped{false};
@@ -143,11 +145,14 @@ class OpticalTransportService
     // Register one producer lifetime with the service
     ProducerToken make_producer();
 
-    // Pump currently available hits for one event on the calling thread
+    // Pump the target event's lane on the calling thread
     PumpResult pump(long ordinal);
 
-    // Try to pump without blocking on another callback delivery
+    // Try the target event's lane without blocking on callback delivery
     PumpResult try_pump(long ordinal);
+
+    // Try one lane and deliver any results already ready for callbacks
+    PumpResult try_pump();
 
     // Query per-event completion
     bool is_complete(long ordinal) const;
@@ -169,8 +174,9 @@ class OpticalTransportService
                              OpticalTransportBurst burst);
     static void
     close_event(std::shared_ptr<SharedState> const& state, long ordinal);
-    static PumpResult pump(
-        std::shared_ptr<SharedState> const& state, long ordinal, bool try_lock);
+    static PumpResult pump(std::shared_ptr<SharedState> const& state,
+                           std::optional<long> ordinal,
+                           bool try_lock);
     static bool
     is_complete(std::shared_ptr<SharedState> const& state, long ordinal);
     static void wait_until_complete(std::shared_ptr<SharedState> const& state,
