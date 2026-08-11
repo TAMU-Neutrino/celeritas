@@ -22,6 +22,8 @@
 #include "AlongStepFactory.hh"
 #include "ExceptionConverter.hh"
 
+#include "detail/OpticalSharedQueue.hh"
+
 namespace celeritas
 {
 namespace
@@ -42,6 +44,38 @@ inp::System load_system(SetupOptions const& so)
         s.device = d;
     }
     return s;
+}
+
+//---------------------------------------------------------------------------//
+/*!
+ * Resolve optical streaming input and environment overrides for setup.
+ */
+inp::OpticalStreaming load_optical_streaming(OpticalSetupOptions const& optical)
+{
+    inp::OpticalStreaming result = optical.streaming;
+    if (!std::holds_alternative<inp::OpticalOffloadGenerator>(optical.generator))
+    {
+        // Only LocalOpticalGenOffload has process-wide producer tokens.
+        result.shared_queue = false;
+        return result;
+    }
+
+    auto const shared = detail::optical_shared_queue_config(result);
+    result.shared_queue = result.enabled && static_cast<bool>(shared);
+    if (result.shared_queue)
+    {
+        result.lane_count = shared.lanes;
+    }
+
+#if CELERITAS_CORE_GEO == CELERITAS_CORE_GEO_GEANT4
+    if (result.shared_queue && !celeritas::device())
+    {
+        // The LocalOpticalGenOffload host fallback remains worker-owned
+        // because Geant4 navigation state cannot move to service threads.
+        result.shared_queue = false;
+    }
+#endif
+    return result;
 }
 
 //---------------------------------------------------------------------------//
@@ -124,7 +158,7 @@ void ProblemSetup::operator()(inp::Problem& p) const
     if (so.optical)
     {
         p.control.optical_capacity = so.optical->capacity;
-        p.control.optical_streaming = so.optical->streaming;
+        p.control.optical_streaming = load_optical_streaming(*so.optical);
         p.tracking.optical_limits = so.optical->limits;
         p.scoring.optical_detector = so.optical->detectors;
     }
@@ -248,7 +282,7 @@ void OpticalProblemSetup::operator()(inp::OpticalProblem& p) const
     }();
 
     CELER_ASSERT(so.optical);
-    p.streaming = so.optical->streaming;
+    p.streaming = load_optical_streaming(*so.optical);
     p.generator = so.optical->generator;
     p.capacity = so.optical->capacity;
     p.detectors = so.optical->detectors;

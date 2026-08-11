@@ -584,6 +584,38 @@ TEST(OpticalTransportServiceTest, drain_with_in_flight_work)
 }
 
 //---------------------------------------------------------------------------//
+TEST(OpticalTransportServiceTest, lane_action_times_recorded_once)
+{
+    FakeLaneSetup fake{2};
+    std::vector<size_type> callback_count(2);
+    std::vector<double> generated(2);
+    Service service{{2, 4, 4},
+                    fake.factory(),
+                    Service::HitCallback{},
+                    [&](LaneId lane,
+                        detail::OpticalTransportLaneInterface::MapStrDbl time) {
+                        ++callback_count[*lane];
+                        generated[*lane] = time.at("fake-transport");
+                    }};
+    {
+        auto token = service.make_producer();
+        token.register_event(0);
+        token.submit_burst(0, 2, 1);
+        token.close_event(0);
+        token.register_event(1);
+        token.submit_burst(1, 3, 1);
+        token.close_event(1);
+        token.wait_until_complete(0);
+        token.wait_until_complete(1);
+    }
+
+    service.drain_and_stop();
+    service.drain_and_stop();
+    EXPECT_VEC_EQ((std::vector<size_type>{1, 1}), callback_count);
+    EXPECT_VEC_EQ((std::vector<double>{2, 3}), generated);
+}
+
+//---------------------------------------------------------------------------//
 TEST(OpticalTransportServiceTest, bounded_memory_soak)
 {
     constexpr long num_events = 100000;

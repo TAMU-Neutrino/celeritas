@@ -12,6 +12,7 @@
 
 #include "corecel/Assert.hh"
 #include "corecel/sys/Environment.hh"
+#include "celeritas/setup/Control.hh"
 
 namespace celeritas
 {
@@ -67,17 +68,66 @@ parse_optical_shared_queue(std::string_view lanes, std::string_view base)
                        std::numeric_limits<long>::max()),
                    << "shared optical base ordinal is too large");
 
-    return {static_cast<size_type>(parsed_lanes),
-            static_cast<long>(parsed_base)};
+    OpticalSharedQueueConfig result;
+    result.lanes = static_cast<size_type>(parsed_lanes);
+    result.base_ordinal = static_cast<long>(parsed_base);
+    return result;
 }
 
 //---------------------------------------------------------------------------//
 /*!
- * Read provisional shared-queue settings from the environment.
+ * Resolve input configuration with explicit environment override values.
  */
-OpticalSharedQueueConfig optical_shared_queue_config()
+OpticalSharedQueueConfig
+resolve_optical_shared_queue(inp::OpticalStreaming const& input,
+                             std::string_view lanes,
+                             std::string_view base)
 {
-    return parse_optical_shared_queue(
+    OpticalSharedQueueConfig env_config;
+    if (!lanes.empty())
+    {
+        env_config = parse_optical_shared_queue(lanes, base);
+    }
+    else if (!base.empty())
+    {
+        CELER_VALIDATE(input.shared_queue,
+                       << "CELER_OPTICAL_SHARED_BASE_ORDINAL requires a "
+                          "configured shared optical queue or "
+                          "CELER_OPTICAL_SHARED_QUEUE");
+        env_config = parse_optical_shared_queue(
+            std::to_string(input.lane_count), base);
+    }
+
+    inp::OpticalStreaming resolved = input;
+    if (env_config)
+    {
+        resolved.shared_queue = true;
+        resolved.lane_count = env_config.lanes;
+    }
+    setup::optical_streams(resolved, 1);
+
+    if (!resolved.shared_queue)
+    {
+        return {};
+    }
+
+    OpticalSharedQueueConfig result;
+    result.lanes = resolved.lane_count;
+    result.base_ordinal = env_config.base_ordinal;
+    result.unresolved_limit = resolved.unresolved_event_limit;
+    result.staged_bytes_limit = resolved.staged_bytes_limit;
+    return result;
+}
+
+//---------------------------------------------------------------------------//
+/*!
+ * Resolve input configuration with process environment overrides.
+ */
+OpticalSharedQueueConfig
+optical_shared_queue_config(inp::OpticalStreaming const& input)
+{
+    return resolve_optical_shared_queue(
+        input,
         celeritas::getenv("CELER_OPTICAL_SHARED_QUEUE"),
         celeritas::getenv("CELER_OPTICAL_SHARED_BASE_ORDINAL"));
 }

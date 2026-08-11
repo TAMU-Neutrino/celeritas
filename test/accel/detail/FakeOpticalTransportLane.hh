@@ -163,6 +163,11 @@ class FakeOpticalTransportLane final
         ++state_->finalizations;
     }
 
+    MapStrDbl action_time() const final
+    {
+        return {{"fake-transport", static_cast<double>(total_generated_)}};
+    }
+
   private:
     size_type record_call(bool close)
     {

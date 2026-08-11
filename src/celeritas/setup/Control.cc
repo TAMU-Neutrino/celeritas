@@ -11,6 +11,7 @@
 #include "celeritas/global/CoreSizes.hh"
 #include "celeritas/inp/Control.hh"
 #include "celeritas/optical/OpticalSizes.hh"
+#include "celeritas/optical/Types.hh"
 
 namespace celeritas
 {
@@ -104,6 +105,30 @@ OpticalSizes capacity(inp::OpticalStateCapacity const& c, size_type num_streams)
 
     CELER_ENSURE(result);
     return result;
+}
+
+//---------------------------------------------------------------------------//
+/*!
+ * Validate streaming controls and resolve optical stream ownership.
+ */
+size_type
+optical_streams(inp::OpticalStreaming const& streaming, size_type num_workers)
+{
+    CELER_VALIDATE(num_workers > 0,
+                   << "a positive worker stream count is required");
+    CELER_VALIDATE(streaming.lane_count > 0,
+                   << "optical shared lane count must be positive");
+    CELER_VALIDATE(
+        streaming.unresolved_event_limit > 0
+            && streaming.unresolved_event_limit < optical::event_ring,
+        << "optical unresolved-event limit must be positive and "
+           "less than the "
+        << optical::event_ring << "-event ring");
+    CELER_VALIDATE(
+        !streaming.staged_bytes_limit || *streaming.staged_bytes_limit > 0,
+        << "optical staged-byte limit must be positive");
+
+    return streaming.shared_queue ? streaming.lane_count : num_workers;
 }
 
 //---------------------------------------------------------------------------//

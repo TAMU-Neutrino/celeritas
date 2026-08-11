@@ -40,10 +40,11 @@ class SharedParams;
  * delivered on the producer thread by PumpStreaming, and Flush becomes a
  * stage-drain-pump barrier with unchanged semantics.
  *
- * As a provisional opt-in, \c CELER_OPTICAL_SHARED_QUEUE=N replaces the
- * per-worker lane with a producer token on one process-wide service with
- * \c N lanes. \c CELER_OPTICAL_SHARED_BASE_ORDINAL optionally sets the first
- * run-global event ordinal (zero by default).
+ * With \c inp::OpticalStreaming::shared_queue, the per-worker lane is replaced
+ * by a producer token on one process-wide service. The
+ * \c CELER_OPTICAL_SHARED_QUEUE and \c CELER_OPTICAL_SHARED_BASE_ORDINAL
+ * environment variables override the configured lane count and first
+ * run-global event ordinal.
  */
 class LocalOpticalGenOffload final : public LocalOffloadInterface
 {

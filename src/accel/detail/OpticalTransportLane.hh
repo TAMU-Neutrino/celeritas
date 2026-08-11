@@ -10,6 +10,8 @@
 #include <functional>
 #include <iterator>
 #include <optional>
+#include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -108,6 +110,8 @@ struct OpticalTransportLaneControl
 class OpticalTransportLaneInterface
 {
   public:
+    using MapStrDbl = std::unordered_map<std::string, double>;
+
     virtual ~OpticalTransportLaneInterface() = default;
 
     // Absorb and transport one burst to the reported progress point
@@ -122,6 +126,9 @@ class OpticalTransportLaneInterface
 
     // Emit lane-local finalization data after the owner thread has stopped
     virtual void finalize() {}
+
+    // Return accumulated action times after the owner thread has stopped
+    virtual MapStrDbl action_time() const { return {}; }
 };
 
 //---------------------------------------------------------------------------//

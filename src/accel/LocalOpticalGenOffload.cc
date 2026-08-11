@@ -27,6 +27,7 @@
 
 #include "SetupOptions.hh"
 #include "SharedParams.hh"
+#include "TimeOutput.hh"
 
 #include "detail/OpticalLane.hh"
 #include "detail/OpticalSharedQueue.hh"
@@ -56,11 +57,12 @@ OpticalServiceRegistry& optical_service_registry()
 }
 
 //---------------------------------------------------------------------------//
-std::shared_ptr<OpticalService>
-acquire_optical_service(SharedParams& owner,
-                        OpticalService::Options options,
-                        OpticalService::LaneFactory make_lane,
-                        OpticalService::HitCallback hit_callback)
+std::shared_ptr<OpticalService> acquire_optical_service(
+    SharedParams& owner,
+    OpticalService::Options options,
+    OpticalService::LaneFactory make_lane,
+    OpticalService::HitCallback hit_callback,
+    OpticalService::ActionTimeCallback action_time_callback)
 {
     auto& registry = optical_service_registry();
     std::lock_guard<std::mutex> lock{registry.mutex};
@@ -81,7 +83,10 @@ acquire_optical_service(SharedParams& owner,
     else
     {
         registry.service = std::make_shared<OpticalService>(
-            options, std::move(make_lane), std::move(hit_callback));
+            options,
+            std::move(make_lane),
+            std::move(hit_callback),
+            std::move(action_time_callback));
         registry.owner = &owner;
         registry.options = options;
     }
@@ -172,9 +177,6 @@ LocalOpticalGenOffload::LocalOpticalGenOffload(SetupOptions const& options,
     CELER_ASSERT(transport->params());
     auto const& optical_params = *transport->params();
 
-    // Check the thread ID and MT model
-    validate_geant_threading(optical_params.sizes().streams);
-
     // Save a pointer to the generator action
     auto generate = std::dynamic_pointer_cast<optical::GeneratorAction const>(
         params.optical_problem_loaded().generator);
@@ -184,12 +186,14 @@ LocalOpticalGenOffload::LocalOpticalGenOffload(SetupOptions const& options,
     auto const& sizes = optical_params.sizes();
     auto_flush_ = sizes.primaries;
 
-    auto const shared_config = detail::optical_shared_queue_config();
+    CELER_ASSERT(options.optical);
+    auto const shared_config
+        = detail::optical_shared_queue_config(options.optical->streaming);
     if (shared_config && streaming_)
     {
-        CELER_VALIDATE(shared_config.lanes <= sizes.streams,
+        CELER_VALIDATE(shared_config.lanes == sizes.streams,
                        << "shared optical lane count " << shared_config.lanes
-                       << " exceeds the " << sizes.streams
+                       << " does not match the " << sizes.streams
                        << " configured optical streams");
         CELER_VALIDATE(sizes.generators <= std::numeric_limits<size_type>::max()
                                                / sizeof(DistributionData),
@@ -197,9 +201,10 @@ LocalOpticalGenOffload::LocalOpticalGenOffload(SetupOptions const& options,
 
         OpticalService::Options service_options;
         service_options.num_lanes = shared_config.lanes;
-        service_options.unresolved_limit = 1024;
-        service_options.staged_bytes_limit = sizes.generators
-                                             * sizeof(DistributionData);
+        service_options.unresolved_limit = shared_config.unresolved_limit;
+        service_options.staged_bytes_limit
+            = shared_config.staged_bytes_limit.value_or(
+                sizes.generators * sizeof(DistributionData));
         service_options.base_ordinal = shared_config.base_ordinal;
         service_options.log_metrics = true;
 
@@ -226,10 +231,19 @@ LocalOpticalGenOffload::LocalOpticalGenOffload(SetupOptions const& options,
                   };
         }
 
-        auto service = acquire_optical_service(params,
-                                               service_options,
-                                               std::move(make_lane),
-                                               std::move(service_hit_callback));
+        OpticalService::ActionTimeCallback service_action_time_callback
+            = [timer = params.timer()](
+                  OpticalService::LaneId lane,
+                  detail::OpticalTransportLaneInterface::MapStrDbl time) {
+                  timer->RecordActionTime(*lane, std::move(time));
+              };
+
+        auto service
+            = acquire_optical_service(params,
+                                      service_options,
+                                      std::move(make_lane),
+                                      std::move(service_hit_callback),
+                                      std::move(service_action_time_callback));
         try
         {
             shared_state_ = std::make_shared<SharedProducer>();
@@ -256,13 +270,16 @@ LocalOpticalGenOffload::LocalOpticalGenOffload(SetupOptions const& options,
         CELER_ENSURE(*this);
         return;
     }
-    else if (shared_config)
+    if (shared_config)
     {
         CELER_LOG_LOCAL(warning)
             << "Process-wide optical transport is unavailable because "
                "streaming is disabled; using the existing synchronous "
                "facade path";
     }
+
+    // Worker-owned transport requires one optical stream per worker
+    validate_geant_threading(optical_params.sizes().streams);
 
     auto stream_id = id_cast<StreamId>(get_geant_thread_id());
     lane_ = std::make_shared<detail::OpticalLane>(std::move(transport),

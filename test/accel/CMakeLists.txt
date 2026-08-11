@@ -53,6 +53,7 @@ celeritas_add_test(detail/OpticalLane.test.cc)
 celeritas_add_test(detail/OpticalSharedQueue.test.cc)
 celeritas_add_test(OpticalEventTable.test.cc)
 celeritas_add_test(OpticalTransportService.test.cc)
+celeritas_add_test(TimeOutput.test.cc)
 celeritas_add_test(HepMC3PrimaryGenerator.test.cc
   ${_needs_hepmc}
   ENVIRONMENT "${CELER_G4ENV}")

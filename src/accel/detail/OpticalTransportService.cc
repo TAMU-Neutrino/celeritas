@@ -65,13 +65,16 @@ struct OpticalTransportService::SharedState
         bool started{false};
     };
 
-    SharedState(Options const& opts, HitCallback callback)
+    SharedState(Options const& opts,
+                HitCallback hit_callback_input,
+                ActionTimeCallback action_time_callback_input)
         : options(opts)
         , events(opts.num_lanes, opts.unresolved_limit, opts.base_ordinal)
         , ingress(opts.num_lanes)
         , delivery(opts.num_lanes)
         , lane_metrics(opts.num_lanes)
-        , hit_callback(std::move(callback))
+        , hit_callback(std::move(hit_callback_input))
+        , action_time_callback(std::move(action_time_callback_input))
         , census_base(opts.base_ordinal)
     {
         auto const num_lanes = static_cast<long>(delivery.size());
@@ -95,6 +98,7 @@ struct OpticalTransportService::SharedState
     std::vector<LaneMetrics> lane_metrics;
     std::unordered_map<long, EventResult> results;
     HitCallback hit_callback;
+    ActionTimeCallback action_time_callback;
     std::exception_ptr terminal_error;
     std::atomic<long> census_base;
     size_type staged_bytes{0};
@@ -498,7 +502,10 @@ void OpticalTransportService::ProducerToken::release() noexcept
  * Construct the standalone shell with one injected implementation per lane.
  */
 OpticalTransportService::OpticalTransportService(
-    Options options, LaneFactory make_lane, HitCallback hit_callback)
+    Options options,
+    LaneFactory make_lane,
+    HitCallback hit_callback,
+    ActionTimeCallback action_time_callback)
 {
     CELER_VALIDATE(options.num_lanes > 0,
                    << "optical transport service requires at least one lane");
@@ -515,7 +522,8 @@ OpticalTransportService::OpticalTransportService(
         << " is too large for " << options.num_lanes << " lanes");
     CELER_VALIDATE(make_lane, << "missing optical lane factory");
 
-    state_ = std::make_shared<SharedState>(options, std::move(hit_callback));
+    state_ = std::make_shared<SharedState>(
+        options, std::move(hit_callback), std::move(action_time_callback));
     lanes_.reserve(options.num_lanes);
     workers_.reserve(options.num_lanes);
     for (size_type i = 0; i < options.num_lanes; ++i)
@@ -674,6 +682,10 @@ void OpticalTransportService::drain_and_stop()
     for (size_type i = 0; i < lanes_.size(); ++i)
     {
         lanes_[i]->finalize();
+        if (state_->action_time_callback)
+        {
+            state_->action_time_callback(LaneId{i}, lanes_[i]->action_time());
+        }
         if (state_->options.log_metrics)
         {
             log_lane_metrics(*state_, LaneId{i});

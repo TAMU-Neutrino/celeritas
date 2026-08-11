@@ -34,8 +34,11 @@ class TimeOutput final : public OutputInterface
     //!@}
 
   public:
-    // Construct with number of CPU threads
+    // Construct with worker-indexed action and event storage
     explicit TimeOutput(size_type num_threads);
+
+    // Construct with lane-indexed actions and worker-indexed events
+    TimeOutput(size_type num_threads, size_type num_lanes);
 
     //!@{
     //! \name Output interface
@@ -51,6 +54,9 @@ class TimeOutput final : public OutputInterface
     // Record the accumulated action times
     void RecordActionTime(MapStrDbl&& time);
 
+    // Record accumulated action times for an explicit lane
+    void RecordActionTime(size_type lane, MapStrDbl&& time);
+
     // Record the time for the event
     void RecordEventTime(double time);
 
@@ -65,6 +71,7 @@ class TimeOutput final : public OutputInterface
 
     std::vector<MapStrDbl> action_time_;
     std::vector<VecDbl> event_time_;
+    bool action_by_lane_{false};
     double setup_time_;
     double total_time_;
 };

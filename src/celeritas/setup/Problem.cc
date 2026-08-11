@@ -286,7 +286,9 @@ auto build_optical_params(
     optical::CoreParams::Input pi;
 
     // Validate state capacity and buffer sizes and set default values
-    pi.sizes = capacity(*p.control.optical_capacity, p.control.num_streams);
+    pi.sizes = capacity(
+        *p.control.optical_capacity,
+        optical_streams(p.control.optical_streaming, p.control.num_streams));
 
     // Registries
     pi.action_reg = std::make_shared<ActionRegistry>();
@@ -352,7 +354,8 @@ auto build_optical_params(inp::OpticalProblem const& p,
     optical::CoreParams::Input pi;
 
     // Validate state capacity and buffer sizes and set default values
-    pi.sizes = capacity(p.capacity, p.num_streams);
+    pi.sizes
+        = capacity(p.capacity, optical_streams(p.streaming, p.num_streams));
 
     // Registries
     pi.action_reg = std::make_shared<ActionRegistry>();
@@ -477,9 +480,21 @@ ProblemLoaded problem(inp::Problem const& p, ImportData const& imported)
 
     // Set up streams
     auto num_streams = params.sizes.streams;
+    auto num_device_streams = num_streams;
+    if (p.control.optical_capacity)
+    {
+        // EM states remain worker-owned, but shared optical states are
+        // lane-owned and may require more physical device streams.
+        auto const num_optical_streams = optical_streams(
+            p.control.optical_streaming, p.control.num_streams);
+        if (num_optical_streams > num_device_streams)
+        {
+            num_device_streams = num_optical_streams;
+        }
+    }
     if (auto& device = celeritas::device())
     {
-        device.create_streams(num_streams);
+        device.create_streams(num_device_streams);
     }
 
     // Create action manager

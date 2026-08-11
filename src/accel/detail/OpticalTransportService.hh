@@ -42,6 +42,8 @@ class OpticalTransportService
     using LaneId = OpticalEventTable::LaneId;
     using HitCallback
         = std::function<void(long, std::vector<optical::DetectorHit> const&)>;
+    using ActionTimeCallback
+        = std::function<void(LaneId, OpticalTransportLaneInterface::MapStrDbl)>;
     using LaneFactory
         = std::function<std::unique_ptr<OpticalTransportLaneInterface>(LaneId)>;
     //!@}
@@ -129,8 +131,10 @@ class OpticalTransportService
 
   public:
     // Construct the standalone shell with one injected implementation per lane
-    OpticalTransportService(
-        Options options, LaneFactory make_lane, HitCallback hit_callback = {});
+    OpticalTransportService(Options options,
+                            LaneFactory make_lane,
+                            HitCallback hit_callback = {},
+                            ActionTimeCallback action_time_callback = {});
     ~OpticalTransportService();
 
     OpticalTransportService(OpticalTransportService const&) = delete;

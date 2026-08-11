@@ -38,8 +38,8 @@
 #include "corecel/sys/Environment.hh"
 #include "corecel/sys/ScopedProfiling.hh"
 #include "geocel/GeantGeoParams.hh"
-#include "geocel/VolumeParams.hh"
 #include "geocel/GeantUtils.hh"
+#include "geocel/VolumeParams.hh"
 #include "celeritas/Types.hh"
 #include "celeritas/em/params/WentzelOKVIParams.hh"
 #include "celeritas/ext/GeantSd.hh"
@@ -64,10 +64,24 @@
 #include "SetupOptions.hh"
 #include "TimeOutput.hh"
 
+#include "detail/OpticalSharedQueue.hh"
+
 namespace celeritas
 {
 namespace
 {
+//---------------------------------------------------------------------------//
+unsigned int num_geant_workers(SetupOptions const& options)
+{
+    int const result = options.get_num_streams
+                           ? options.get_num_streams()
+                           : static_cast<int>(get_geant_num_threads());
+    CELER_VALIDATE(result > 0,
+                   << "Geant4 worker count must be positive (got " << result
+                   << ')');
+    return static_cast<unsigned int>(result);
+}
+
 //---------------------------------------------------------------------------//
 /*!
  * Compare where two geometries put the same global point.
@@ -109,11 +123,10 @@ void compare_geo_placement(GeantGeoParams const& ref,
     // ID range rather than the count would be measuring nothing.
     CELER_LOG(info) << "[GEO-SIZE] geant4: " << ref.volumes()->num_volumes()
                     << " volumes, " << ref.volumes()->num_volume_instances()
-                    << " volume instances, "
-                    << ref.impl_volumes().size() << " impl volumes";
-    CELER_LOG(info) << "[GEO-SIZE] converted: "
-                    << test.volumes()->num_volumes() << " volumes, "
-                    << test.volumes()->num_volume_instances()
+                    << " volume instances, " << ref.impl_volumes().size()
+                    << " impl volumes";
+    CELER_LOG(info) << "[GEO-SIZE] converted: " << test.volumes()->num_volumes()
+                    << " volumes, " << test.volumes()->num_volume_instances()
                     << " volume instances, " << test.impl_volumes().size()
                     << " impl volumes";
     if (num_samples == 0)
@@ -159,9 +172,9 @@ void compare_geo_placement(GeantGeoParams const& ref,
     });
     for (auto const& [id, count] : occ)
     {
-        CELER_LOG(info) << "[GEO-OCCUPANCY] " << count << "  "
-                        << name_of(id >= 0 ? VolumeInstanceId(id)
-                                           : VolumeInstanceId{});
+        CELER_LOG(info)
+            << "[GEO-OCCUPANCY] " << count << "  "
+            << name_of(id >= 0 ? VolumeInstanceId(id) : VolumeInstanceId{});
     }
 
     std::vector<std::pair<std::pair<int, int>, size_type>> sorted(
@@ -398,9 +411,26 @@ SharedParams::SharedParams(SetupOptions const& options)
         return;
     }
 
+    unsigned int const num_workers = num_geant_workers(options);
+
     // Construct input and then build the problem setup
     auto framework_inp = to_inp(options);
     loaded_ = setup::framework_input(framework_inp);
+
+    bool shared_action_streams = false;
+    if (options.optical && options.optical->streaming.enabled
+        && std::holds_alternative<inp::OpticalOffloadGenerator>(
+            options.optical->generator))
+    {
+        shared_action_streams = static_cast<bool>(
+            detail::optical_shared_queue_config(options.optical->streaming));
+#if CELERITAS_CORE_GEO == CELERITAS_CORE_GEO_GEANT4
+        if (!celeritas::device())
+        {
+            shared_action_streams = false;
+        }
+#endif
+    }
 
     using SPOpticalCore = std::shared_ptr<optical::CoreParams const>;
     if (auto optical_params = std::visit(
@@ -432,27 +462,31 @@ SharedParams::SharedParams(SetupOptions const& options)
     // Create bounding box from navigator geometry
     bbox_ = loaded_.geo->get_clhep_bbox();
 
-    std::visit(Overload{
-                   [&](setup::ProblemLoaded const& p) {
-                       // Translate supported particles
-                       verify_offload(offload_particles_,
-                                      *p.core_params->particle(),
-                                      *p.core_params->physics());
+    size_type action_streams = std::visit(
+        Overload{
+            [&](setup::ProblemLoaded const& p) {
+                // Translate supported particles
+                verify_offload(offload_particles_,
+                               *p.core_params->particle(),
+                               *p.core_params->physics());
 
-                       // Set streams and output registry from core params
-                       output_reg_ = p.core_params->output_reg();
-                       this->set_num_streams(p.core_params->sizes().streams);
-                   },
-                   [&](setup::OpticalProblemLoaded const& p) {
-                       // Set streams and output registry from optical params
-                       output_reg_ = p.transporter->params()->output_reg();
-                       this->set_num_streams(
-                           p.transporter->params()->sizes().streams);
-                   },
-               },
-               loaded_.problem);
+                // Set output registry from core params
+                output_reg_ = p.core_params->output_reg();
+                return p.core_params->sizes().streams;
+            },
+            [&](setup::OpticalProblemLoaded const& p) {
+                // Set output registry from optical params
+                output_reg_ = p.transporter->params()->output_reg();
+                return p.transporter->params()->sizes().streams;
+            },
+        },
+        loaded_.problem);
 
-    if (std::string const num_str = celeritas::getenv("CELER_DEBUG_GEO_COMPARE");
+    // Worker state/event bookkeeping is independent of shared optical lanes
+    this->set_num_streams(num_workers);
+
+    if (std::string const num_str
+        = celeritas::getenv("CELER_DEBUG_GEO_COMPARE");
         !num_str.empty())
     {
         // Diagnostic: does the converted geometry put points in the same
@@ -469,15 +503,23 @@ SharedParams::SharedParams(SetupOptions const& options)
                      }},
             loaded_.problem);
         std::string const box_str = celeritas::getenv("CELER_DEBUG_GEO_BOX");
-        compare_geo_placement(*loaded_.geo,
-                              *core_geo,
-                              static_cast<size_type>(std::stoul(num_str)),
-                              box_str.empty() ? real_type{120}
-                                              : std::stod(box_str));
+        compare_geo_placement(
+            *loaded_.geo,
+            *core_geo,
+            static_cast<size_type>(std::stoul(num_str)),
+            box_str.empty() ? real_type{120} : std::stod(box_str));
     }
 
-    // Add timing output
-    timer_ = std::make_shared<TimeOutput>(this->num_streams());
+    // Add timing output: action streams may be shared optical lanes, while
+    // event timing remains indexed by Geant4 worker.
+    if (shared_action_streams)
+    {
+        timer_ = std::make_shared<TimeOutput>(num_workers, action_streams);
+    }
+    else
+    {
+        timer_ = std::make_shared<TimeOutput>(num_workers);
+    }
     output_reg_->insert(timer_);
 
     if (loaded_.output_file != "-")

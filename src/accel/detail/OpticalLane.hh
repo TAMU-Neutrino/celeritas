@@ -113,6 +113,9 @@ class OpticalLane final : public OpticalTransportLaneInterface
     // Emit this lane's existing transport finalization line
     void finalize() final;
 
+    // Return this lane's accumulated action times
+    MapStrDbl action_time() const final { return this->GetActionTime(); }
+
   private:
     // Host-side streaming instrumentation (see .cc)
     struct Instrumentation;

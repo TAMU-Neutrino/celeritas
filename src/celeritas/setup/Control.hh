@@ -16,6 +16,7 @@ struct OpticalSizes;
 namespace inp
 {
 struct CoreStateCapacity;
+struct OpticalStreaming;
 struct OpticalStateCapacity;
 }  // namespace inp
 
@@ -27,6 +28,9 @@ CoreSizes capacity(inp::CoreStateCapacity const& c, size_type num_streams);
 // Resolve optical state capacity values
 OpticalSizes
 capacity(inp::OpticalStateCapacity const& c, size_type num_streams);
+
+// Validate streaming controls and resolve optical stream ownership
+size_type optical_streams(inp::OpticalStreaming const&, size_type num_workers);
 
 //---------------------------------------------------------------------------//
 }  // namespace setup

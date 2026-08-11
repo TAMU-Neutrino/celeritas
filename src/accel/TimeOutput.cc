@@ -30,6 +30,20 @@ TimeOutput::TimeOutput(size_type num_threads)
 
 //---------------------------------------------------------------------------//
 /*!
+ * Construct with lane-indexed actions and worker-indexed events.
+ */
+TimeOutput::TimeOutput(size_type num_threads, size_type num_lanes)
+    : action_by_lane_(true)
+{
+    CELER_EXPECT(num_threads > 0);
+    CELER_EXPECT(num_lanes > 0);
+
+    action_time_.resize(num_lanes);
+    event_time_.resize(num_threads);
+}
+
+//---------------------------------------------------------------------------//
+/*!
  * Write output to the given JSON object.
  */
 void TimeOutput::output(JsonPimpl* j) const
@@ -39,9 +53,15 @@ void TimeOutput::output(JsonPimpl* j) const
 
     auto obj = json::object();
 
+    json index = "thread";
+    if (action_by_lane_)
+    {
+        index = {{"actions", "lane"}, {"events", "thread"}};
+    }
+
     obj = {
         {"_units", TimeSecond::unit_type::label()},
-        {"_index", "thread"},
+        {"_index", std::move(index)},
         {"actions", action_time_},
         {"events", event_time_},
         {"total", total_time_},
@@ -57,9 +77,26 @@ void TimeOutput::output(JsonPimpl* j) const
  */
 void TimeOutput::RecordActionTime(MapStrDbl&& time)
 {
+    if (time.empty())
+    {
+        // Shared producers do not own lane action totals
+        return;
+    }
     size_type thread_id = get_geant_thread_id();
     CELER_ASSERT(thread_id < action_time_.size());
     action_time_[thread_id] = std::move(time);
+}
+
+//---------------------------------------------------------------------------//
+/*!
+ * Record accumulated action times for an explicit lane.
+ */
+void TimeOutput::RecordActionTime(size_type lane, MapStrDbl&& time)
+{
+    CELER_VALIDATE(lane < action_time_.size(),
+                   << "invalid optical action-time lane " << lane << " of "
+                   << action_time_.size());
+    action_time_[lane] = std::move(time);
 }
 
 //---------------------------------------------------------------------------//

@@ -104,11 +104,20 @@ struct CoreStateCapacity : StateCapacity
  * signal is the loop going empty, which continuous injection may never
  * allow. Zero disables the census. It costs one launch over the live tracks
  * per period and nothing per photon.
+ *
+ * With \c shared_queue, worker producers feed a process-wide service with
+ * \c lane_count independently owned optical streams. The unresolved-event
+ * limit must remain below the event ring. An unset staged-byte limit uses the
+ * optical generator buffer's host size.
  */
 struct OpticalStreaming
 {
     bool enabled{false};
     size_type event_census_period{16};
+    bool shared_queue{false};
+    size_type lane_count{1};
+    size_type unresolved_event_limit{1024};
+    std::optional<size_type> staged_bytes_limit;
 };
 
 //---------------------------------------------------------------------------//
