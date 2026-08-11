@@ -199,7 +199,9 @@ TEST(OpticalTransportServiceTest, concurrent_out_of_order_producers)
     }
     for (auto const& state : fake.states)
     {
-        EXPECT_NE(std::thread::id{}, state->snapshot().owner);
+        auto const observed = state->snapshot();
+        EXPECT_NE(std::thread::id{}, observed.owner);
+        EXPECT_EQ(1, observed.finalizations);
     }
 }
 
@@ -323,6 +325,29 @@ TEST(OpticalTransportServiceTest, admission_window_keeps_gap_open)
 }
 
 //---------------------------------------------------------------------------//
+TEST(OpticalTransportServiceTest, nonzero_base_ordinal)
+{
+    FakeLaneSetup fake{2};
+    HitCollector hits;
+    Service service{{2, 8, 8, 100}, fake.factory(), hits.callback()};
+    {
+        auto token = service.make_producer();
+        EXPECT_EQ(LaneId{1}, token.register_event(101));
+        EXPECT_EQ(LaneId{0}, token.register_event(100));
+        for (long ordinal : {100, 101})
+        {
+            token.submit_burst(ordinal, 1, 1);
+            token.close_event(ordinal);
+            token.wait_until_complete(ordinal);
+        }
+    }
+    service.drain_and_stop();
+    EXPECT_EQ(101, service.statistics().completion_watermark);
+    EXPECT_EQ(1, hits.photons(100));
+    EXPECT_EQ(1, hits.photons(101));
+}
+
+//---------------------------------------------------------------------------//
 TEST(OpticalTransportServiceTest,
      staged_bytes_backpressure_engages_and_releases)
 {
@@ -403,6 +428,76 @@ TEST(OpticalTransportServiceTest, lane_failure_fans_out)
         EXPECT_THROW(third.register_event(2), std::runtime_error);
     }
     EXPECT_THROW(service.drain_and_stop(), std::runtime_error);
+}
+
+//---------------------------------------------------------------------------//
+TEST(OpticalTransportServiceTest, try_pump_reports_contention)
+{
+    auto callback_gate = std::make_shared<FakeOpticalLaneGate>();
+    FakeLaneSetup fake{1};
+    Service service{
+        {1, 2, 2},
+        fake.factory(),
+        [callback_gate](long, std::vector<optical::DetectorHit> const&) {
+            callback_gate->wait();
+        }};
+    {
+        auto token = service.make_producer();
+        token.register_event(0);
+        token.submit_burst(0, 1, 1);
+        token.close_event(0);
+
+        auto pumper = std::async(std::launch::async, [&service] {
+            while (true)
+            {
+                auto result = service.pump(0);
+                if (result.complete)
+                {
+                    return result;
+                }
+                std::this_thread::yield();
+            }
+        });
+        if (!callback_gate->wait_until_entered(2s))
+        {
+            callback_gate->release();
+            FAIL() << "hit callback did not enter the deterministic gate";
+        }
+        auto const contended = service.try_pump(0);
+        EXPECT_TRUE(contended.contended);
+        EXPECT_FALSE(contended.pumped);
+        EXPECT_FALSE(contended.complete);
+        callback_gate->release();
+        EXPECT_TRUE(pumper.get().complete);
+        token.wait_until_complete(0);
+    }
+    service.drain_and_stop();
+}
+
+//---------------------------------------------------------------------------//
+TEST(OpticalTransportServiceTest, blocking_wait_pumps_lane_predecessors)
+{
+    FakeLaneSetup fake{1};
+    HitCollector hits;
+    Service service{{1, 4, 4}, fake.factory(), hits.callback()};
+    {
+        auto token = service.make_producer();
+        for (long ordinal : {0, 1})
+        {
+            token.register_event(ordinal);
+            token.submit_burst(ordinal, 1, 1);
+            token.close_event(ordinal);
+        }
+
+        service.wait_until_complete(1);
+        EXPECT_TRUE(token.is_complete(0));
+        EXPECT_TRUE(token.is_complete(1));
+        token.wait_until_complete(0);
+        token.wait_until_complete(1);
+    }
+    service.drain_and_stop();
+    EXPECT_EQ(1, hits.photons(0));
+    EXPECT_EQ(1, hits.photons(1));
 }
 
 //---------------------------------------------------------------------------//

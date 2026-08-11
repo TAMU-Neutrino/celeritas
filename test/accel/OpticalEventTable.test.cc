@@ -183,5 +183,27 @@ TEST(OpticalEventTableTest, admission_backpressure_bound)
 }
 
 //---------------------------------------------------------------------------//
+TEST(OpticalEventTableTest, base_ordinal)
+{
+    OpticalEventTable events{2, 4, 100};
+    EXPECT_EQ(99, events.completion_watermark());
+
+    EXPECT_EQ(LaneId{1}, events.register_event(101));
+    EXPECT_EQ(LaneId{0}, events.register_event(100));
+    EXPECT_THROW(events.register_event(99), RuntimeError);
+
+    for (long ordinal : {100, 101})
+    {
+        events.close_event(ordinal);
+        events.record_census(LaneId{static_cast<size_type>(ordinal % 2)},
+                             std::nullopt);
+        events.record_delivered_through(
+            LaneId{static_cast<size_type>(ordinal % 2)}, ordinal);
+        EXPECT_TRUE(events.is_complete(ordinal));
+    }
+    EXPECT_EQ(101, events.completion_watermark());
+}
+
+//---------------------------------------------------------------------------//
 }  // namespace test
 }  // namespace celeritas

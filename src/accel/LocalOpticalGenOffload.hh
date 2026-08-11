@@ -39,6 +39,11 @@ class SharedParams;
  * the device works while Geant4 tracks. Hits collected on the consumer are
  * delivered on the producer thread by PumpStreaming, and Flush becomes a
  * stage-drain-pump barrier with unchanged semantics.
+ *
+ * As a provisional opt-in, \c CELER_OPTICAL_SHARED_QUEUE=N replaces the
+ * per-worker lane with a producer token on one process-wide service with
+ * \c N lanes. \c CELER_OPTICAL_SHARED_BASE_ORDINAL optionally sets the first
+ * run-global event ordinal (zero by default).
  */
 class LocalOpticalGenOffload final : public LocalOffloadInterface
 {
@@ -92,19 +97,28 @@ class LocalOpticalGenOffload final : public LocalOffloadInterface
     //! Whether streaming injection is active (see OpticalSetupOptions)
     bool StreamingEnabled() const { return streaming_; }
 
-    // Hand the buffered records to the consumer thread, tagged with the
-    // current event ordinal, and return immediately
+    //! Whether the provisional process-wide queue is active
+    bool SharedQueueEnabled() const
+    {
+        return static_cast<bool>(shared_state_);
+    }
+
+    // Hand buffered records to transport; shared mode also closes the event
     void StageStreaming();
 
     // Try to deliver hits collected by the consumer on the calling thread and
     // return the highest event ordinal delivered through (-1 if none or if
-    // another thread is pumping). The ordinal counts InitializeEvent calls on
-    // this thread, zero-based.
+    // another thread is pumping). The ordinal is in the caller's run-global
+    // coordinates.
     long PumpStreaming();
 
   private:
     // Lane-local transport state and streaming consumer
     std::shared_ptr<detail::OpticalLane> lane_;
+
+    // Process-wide service and synchronized producer state (see .cc)
+    struct SharedProducer;
+    std::shared_ptr<SharedProducer> shared_state_;
 
     // Buffered distributions for offloading
     std::vector<DistributionData> buffer_;
@@ -129,6 +143,20 @@ class LocalOpticalGenOffload final : public LocalOffloadInterface
 
     // One-shot marker for the reseed-disabled note
     bool reseed_note_logged_{false};
+
+    //// SHARED QUEUE HELPERS //
+
+    // Submit buffered records without closing the current event
+    void SubmitStreaming();
+
+    // Close the current shared event against later submissions
+    void CloseSharedEvent();
+
+    // Pump owned events and return the producer-local safe cursor
+    long PumpSharedEvents(bool blocking);
+
+    // Release this producer and drain if it is the last facade
+    void ReleaseSharedService();
 };
 
 //---------------------------------------------------------------------------//

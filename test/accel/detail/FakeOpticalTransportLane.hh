@@ -67,18 +67,20 @@ struct FakeOpticalLaneState
     {
         size_type transported_bursts{0};
         size_type closed_events{0};
+        size_type finalizations{0};
         std::thread::id owner;
     };
 
     Snapshot snapshot() const
     {
         std::lock_guard<std::mutex> lock{mutex};
-        return {transported_bursts, closed_events, owner};
+        return {transported_bursts, closed_events, finalizations, owner};
     }
 
     mutable std::mutex mutex;
     size_type transported_bursts{0};
     size_type closed_events{0};
+    size_type finalizations{0};
     std::thread::id owner;
 };
 
@@ -153,6 +155,12 @@ class FakeOpticalTransportLane final
         result.total_generated = total_generated_;
         result.census_fresh = true;
         return result;
+    }
+
+    void finalize() final
+    {
+        std::lock_guard<std::mutex> lock{state_->mutex};
+        ++state_->finalizations;
     }
 
   private:

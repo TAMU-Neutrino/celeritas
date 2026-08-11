@@ -17,10 +17,14 @@ namespace detail
 /*!
  * Construct for a fixed number of lanes and admission bound.
  */
-OpticalEventTable::OpticalEventTable(size_type num_lanes,
-                                     size_type unresolved_limit)
-    : lanes_(num_lanes), unresolved_limit_(unresolved_limit)
+OpticalEventTable::OpticalEventTable(
+    size_type num_lanes, size_type unresolved_limit, long base_ordinal)
+    : lanes_(num_lanes)
+    , unresolved_limit_(unresolved_limit)
+    , completion_watermark_(base_ordinal > 0 ? base_ordinal - 1 : -1)
 {
+    CELER_VALIDATE(base_ordinal >= 0,
+                   << "invalid negative optical base ordinal " << base_ordinal);
     CELER_VALIDATE(num_lanes > 0,
                    << "optical event table requires at least one lane");
     CELER_VALIDATE(unresolved_limit > 0,

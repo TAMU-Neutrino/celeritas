@@ -6,6 +6,11 @@
 //---------------------------------------------------------------------------//
 #include "LocalOpticalGenOffload.hh"
 
+#include <deque>
+#include <exception>
+#include <limits>
+#include <mutex>
+#include <optional>
 #include <utility>
 #include <G4EventManager.hh>
 #include <G4MTRunManager.hh>
@@ -17,15 +22,109 @@
 #include "celeritas/optical/CoreParams.hh"
 #include "celeritas/optical/CoreState.hh"
 #include "celeritas/optical/Transporter.hh"
+#include "celeritas/optical/Types.hh"
 #include "celeritas/optical/gen/GeneratorAction.hh"
 
 #include "SetupOptions.hh"
 #include "SharedParams.hh"
 
 #include "detail/OpticalLane.hh"
+#include "detail/OpticalSharedQueue.hh"
+#include "detail/OpticalTransportService.hh"
 
 namespace celeritas
 {
+namespace
+{
+//---------------------------------------------------------------------------//
+using OpticalService = detail::OpticalTransportService;
+
+struct OpticalServiceRegistry
+{
+    std::mutex mutex;
+    std::shared_ptr<OpticalService> service;
+    SharedParams* owner{nullptr};
+    OpticalService::Options options;
+    size_type users{0};
+};
+
+//---------------------------------------------------------------------------//
+OpticalServiceRegistry& optical_service_registry()
+{
+    static OpticalServiceRegistry result;
+    return result;
+}
+
+//---------------------------------------------------------------------------//
+std::shared_ptr<OpticalService>
+acquire_optical_service(SharedParams& owner,
+                        OpticalService::Options options,
+                        OpticalService::LaneFactory make_lane,
+                        OpticalService::HitCallback hit_callback)
+{
+    auto& registry = optical_service_registry();
+    std::lock_guard<std::mutex> lock{registry.mutex};
+    if (registry.service)
+    {
+        CELER_VALIDATE(registry.owner == &owner,
+                       << "shared optical service belongs to a different "
+                          "Celeritas problem");
+        CELER_VALIDATE(
+            registry.options.num_lanes == options.num_lanes
+                && registry.options.unresolved_limit == options.unresolved_limit
+                && registry.options.staged_bytes_limit
+                       == options.staged_bytes_limit
+                && registry.options.base_ordinal == options.base_ordinal
+                && registry.options.log_metrics == options.log_metrics,
+            << "inconsistent shared optical service options");
+    }
+    else
+    {
+        registry.service = std::make_shared<OpticalService>(
+            options, std::move(make_lane), std::move(hit_callback));
+        registry.owner = &owner;
+        registry.options = options;
+    }
+    ++registry.users;
+    return registry.service;
+}
+
+//---------------------------------------------------------------------------//
+void release_optical_service(std::shared_ptr<OpticalService> const& service)
+{
+    std::shared_ptr<OpticalService> drain;
+    {
+        auto& registry = optical_service_registry();
+        std::lock_guard<std::mutex> lock{registry.mutex};
+        CELER_ASSERT(registry.service == service);
+        CELER_ASSERT(registry.users > 0);
+        if (--registry.users == 0)
+        {
+            drain = std::move(registry.service);
+            registry.owner = nullptr;
+            registry.options = {};
+        }
+    }
+    if (drain)
+    {
+        drain->drain_and_stop();
+    }
+}
+
+//---------------------------------------------------------------------------//
+}  // namespace
+
+//---------------------------------------------------------------------------//
+struct LocalOpticalGenOffload::SharedProducer
+{
+    std::mutex mutex;
+    std::shared_ptr<OpticalService> service;
+    std::optional<OpticalService::ProducerToken> token;
+    std::deque<long> events;
+    long delivered_through{-1};
+    bool event_open{false};
+};
+
 //---------------------------------------------------------------------------//
 /*!
  * Construct with options and shared data.
@@ -85,6 +184,86 @@ LocalOpticalGenOffload::LocalOpticalGenOffload(SetupOptions const& options,
     auto const& sizes = optical_params.sizes();
     auto_flush_ = sizes.primaries;
 
+    auto const shared_config = detail::optical_shared_queue_config();
+    if (shared_config && streaming_)
+    {
+        CELER_VALIDATE(shared_config.lanes <= sizes.streams,
+                       << "shared optical lane count " << shared_config.lanes
+                       << " exceeds the " << sizes.streams
+                       << " configured optical streams");
+        CELER_VALIDATE(sizes.generators <= std::numeric_limits<size_type>::max()
+                                               / sizeof(DistributionData),
+                       << "optical generator byte capacity overflow");
+
+        OpticalService::Options service_options;
+        service_options.num_lanes = shared_config.lanes;
+        service_options.unresolved_limit = 1024;
+        service_options.staged_bytes_limit = sizes.generators
+                                             * sizeof(DistributionData);
+        service_options.base_ordinal = shared_config.base_ordinal;
+        service_options.log_metrics = true;
+
+        auto make_lane = [transport, generate, tracks = sizes.tracks](
+                             OpticalService::LaneId lane) {
+            return std::make_unique<detail::OpticalLane>(
+                transport,
+                generate,
+                id_cast<StreamId>(*lane),
+                tracks,
+                HitCallbackFunc{},
+                false);
+        };
+        OpticalService::HitCallback service_hit_callback;
+        if (user_hit_callback)
+        {
+            service_hit_callback
+                = [callback = std::move(user_hit_callback)](
+                      long, std::vector<optical::DetectorHit> const& hits) {
+                      if (!hits.empty())
+                      {
+                          callback(make_span(hits));
+                      }
+                  };
+        }
+
+        auto service = acquire_optical_service(params,
+                                               service_options,
+                                               std::move(make_lane),
+                                               std::move(service_hit_callback));
+        try
+        {
+            shared_state_ = std::make_shared<SharedProducer>();
+            shared_state_->service = service;
+            shared_state_->token.emplace(service->make_producer());
+            shared_state_->delivered_through = shared_config.base_ordinal - 1;
+        }
+        catch (...)
+        {
+            auto error = std::current_exception();
+            try
+            {
+                release_optical_service(service);
+            }
+            catch (...)
+            {
+            }
+            std::rethrow_exception(error);
+        }
+        CELER_LOG_LOCAL(status)
+            << "Enabled process-wide optical transport with "
+            << shared_config.lanes << " lanes from base ordinal "
+            << shared_config.base_ordinal;
+        CELER_ENSURE(*this);
+        return;
+    }
+    else if (shared_config)
+    {
+        CELER_LOG_LOCAL(warning)
+            << "Process-wide optical transport is unavailable because "
+               "streaming is disabled; using the existing synchronous "
+               "facade path";
+    }
+
     auto stream_id = id_cast<StreamId>(get_geant_thread_id());
     lane_ = std::make_shared<detail::OpticalLane>(std::move(transport),
                                                   std::move(generate),
@@ -112,7 +291,8 @@ void LocalOpticalGenOffload::Initialize(SetupOptions const& options,
  */
 bool LocalOpticalGenOffload::Initialized() const
 {
-    return lane_ && static_cast<bool>(*lane_);
+    return (lane_ && static_cast<bool>(*lane_))
+           || (shared_state_ && shared_state_->service && shared_state_->token);
 }
 
 //---------------------------------------------------------------------------//
@@ -125,6 +305,29 @@ void LocalOpticalGenOffload::InitializeEvent(int id)
     CELER_EXPECT(id >= 0);
 
     event_id_ = id_cast<UniqueEventId>(id);
+
+    if (this->SharedQueueEnabled())
+    {
+        auto& shared = *shared_state_;
+        {
+            std::lock_guard<std::mutex> lock{shared.mutex};
+            CELER_VALIDATE(!shared.event_open,
+                           << "shared optical event " << event_ordinal_
+                           << " was not closed before event " << id
+                           << " started");
+            CELER_VALIDATE(id >= event_ordinal_,
+                           << "shared optical event ordinal went backwards ("
+                           << id << " after " << event_ordinal_ << ")");
+        }
+        shared.token->register_event(id);
+        {
+            std::lock_guard<std::mutex> lock{shared.mutex};
+            shared.events.push_back(id);
+            shared.event_open = true;
+        }
+        event_ordinal_ = id;
+        return;
+    }
 
     if (this->StreamingEnabled())
     {
@@ -188,7 +391,7 @@ void LocalOpticalGenOffload::Push(
         if (this->StreamingEnabled())
         {
             // Watermark pressure: hand the records over without blocking
-            this->StageStreaming();
+            this->SubmitStreaming();
         }
         else
         {
@@ -204,6 +407,15 @@ void LocalOpticalGenOffload::Push(
 void LocalOpticalGenOffload::Flush()
 {
     CELER_EXPECT(*this);
+
+    if (this->SharedQueueEnabled())
+    {
+        ScopedProfiling profile_this("flush-shared-streaming");
+        this->SubmitStreaming();
+        this->CloseSharedEvent();
+        this->PumpSharedEvents(true);
+        return;
+    }
 
     if (this->StreamingEnabled())
     {
@@ -273,6 +485,12 @@ void LocalOpticalGenOffload::Flush()
 auto LocalOpticalGenOffload::GetActionTime() const -> MapStrDbl
 {
     CELER_EXPECT(*this);
+    if (this->SharedQueueEnabled())
+    {
+        // Lane timing is process-owned in shared mode; per-lane diagnostic
+        // indexing is part of the later configuration plumbing piece.
+        return {};
+    }
     return lane_->GetActionTime();
 }
 
@@ -283,6 +501,43 @@ auto LocalOpticalGenOffload::GetActionTime() const -> MapStrDbl
 void LocalOpticalGenOffload::Finalize()
 {
     CELER_EXPECT(*this);
+
+    if (this->SharedQueueEnabled())
+    {
+        std::exception_ptr failure;
+        try
+        {
+            this->Flush();
+            CELER_VALIDATE(buffer_.empty(),
+                           << "offloaded photons (" << num_photons_
+                           << " in buffer of " << buffer_.size()
+                           << " distributions) were not flushed");
+        }
+        catch (...)
+        {
+            failure = std::current_exception();
+        }
+
+        try
+        {
+            this->ReleaseSharedService();
+        }
+        catch (...)
+        {
+            if (!failure)
+            {
+                failure = std::current_exception();
+            }
+        }
+
+        *this = {};
+        if (failure)
+        {
+            std::rethrow_exception(failure);
+        }
+        CELER_ENSURE(!*this);
+        return;
+    }
 
     if (lane_->StreamingStarted())
     {
@@ -315,7 +570,11 @@ void LocalOpticalGenOffload::Finalize()
 void LocalOpticalGenOffload::StageStreaming()
 {
     CELER_EXPECT(*this);
-    lane_->StageStreaming(buffer_, num_photons_, event_ordinal_);
+    this->SubmitStreaming();
+    if (this->SharedQueueEnabled())
+    {
+        this->CloseSharedEvent();
+    }
 }
 
 //---------------------------------------------------------------------------//
@@ -324,7 +583,114 @@ void LocalOpticalGenOffload::StageStreaming()
  */
 long LocalOpticalGenOffload::PumpStreaming()
 {
+    if (this->SharedQueueEnabled())
+    {
+        return this->PumpSharedEvents(false);
+    }
     return lane_ ? lane_->TryPumpStreaming() : -1;
+}
+
+//---------------------------------------------------------------------------//
+/*!
+ * Submit buffered records without closing the current event.
+ */
+void LocalOpticalGenOffload::SubmitStreaming()
+{
+    CELER_EXPECT(*this);
+    if (!this->SharedQueueEnabled())
+    {
+        lane_->StageStreaming(buffer_, num_photons_, event_ordinal_);
+        return;
+    }
+    if (buffer_.empty())
+    {
+        return;
+    }
+
+    auto& shared = *shared_state_;
+    {
+        std::lock_guard<std::mutex> lock{shared.mutex};
+        CELER_VALIDATE(shared.event_open,
+                       << "cannot submit optical records without an open "
+                          "shared event");
+    }
+
+    auto records = std::move(buffer_);
+    size_type const num_photons = std::exchange(num_photons_, 0);
+    buffer_.clear();
+    shared.token->submit_burst(event_ordinal_, std::move(records), num_photons);
+}
+
+//---------------------------------------------------------------------------//
+/*!
+ * Close the current shared event against later submissions.
+ */
+void LocalOpticalGenOffload::CloseSharedEvent()
+{
+    CELER_EXPECT(this->SharedQueueEnabled());
+    auto& shared = *shared_state_;
+    {
+        std::lock_guard<std::mutex> lock{shared.mutex};
+        if (!shared.event_open)
+        {
+            return;
+        }
+    }
+
+    shared.token->close_event(event_ordinal_);
+    {
+        std::lock_guard<std::mutex> lock{shared.mutex};
+        shared.event_open = false;
+    }
+}
+
+//---------------------------------------------------------------------------//
+/*!
+ * Pump owned events and return the producer-local safe cursor.
+ */
+long LocalOpticalGenOffload::PumpSharedEvents(bool blocking)
+{
+    CELER_EXPECT(this->SharedQueueEnabled());
+    auto& shared = *shared_state_;
+
+    std::deque<long> events;
+    {
+        std::lock_guard<std::mutex> lock{shared.mutex};
+        events = shared.events;
+    }
+
+    for (long ordinal : events)
+    {
+        if (blocking)
+        {
+            shared.service->wait_until_complete(ordinal);
+        }
+        else if (shared.service->try_pump(ordinal).contended)
+        {
+            return -1;
+        }
+    }
+
+    std::lock_guard<std::mutex> lock{shared.mutex};
+    while (!shared.events.empty()
+           && shared.service->is_complete(shared.events.front()))
+    {
+        shared.delivered_through = shared.events.front();
+        shared.events.pop_front();
+    }
+    return shared.delivered_through;
+}
+
+//---------------------------------------------------------------------------//
+/*!
+ * Release this producer and drain the process service if it is last.
+ */
+void LocalOpticalGenOffload::ReleaseSharedService()
+{
+    CELER_EXPECT(this->SharedQueueEnabled());
+    auto shared = std::move(shared_state_);
+    shared->token.reset();
+    release_optical_service(shared->service);
 }
 
 //---------------------------------------------------------------------------//

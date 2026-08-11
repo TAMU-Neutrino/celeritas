@@ -56,8 +56,9 @@ struct OpticalTransportLaneProgress
 /*!
  * Interface driven by one service-owned host thread.
  *
- * Implementations are single-owner: every call for one instance is made from
- * the same lane thread and never concurrently.
+ * Implementations are single-owner: transport and close calls for one
+ * instance are made from the same lane thread and never concurrently.
+ * Finalize runs once after that owner thread has joined.
  */
 class OpticalTransportLaneInterface
 {

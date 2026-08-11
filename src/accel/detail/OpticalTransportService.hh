@@ -51,12 +51,15 @@ class OpticalTransportService
         size_type num_lanes{0};
         size_type unresolved_limit{0};
         size_type staged_bytes_limit{0};
+        long base_ordinal{0};
+        bool log_metrics{false};
     };
 
     struct PumpResult
     {
         bool pumped{false};
         bool complete{false};
+        bool contended{false};
     };
 
     struct Statistics
@@ -139,8 +142,14 @@ class OpticalTransportService
     // Pump currently available hits for one event on the calling thread
     PumpResult pump(long ordinal);
 
+    // Try to pump without blocking on another callback delivery
+    PumpResult try_pump(long ordinal);
+
     // Query per-event completion
     bool is_complete(long ordinal) const;
+
+    // Pump and wait until a registered, closed event is complete
+    void wait_until_complete(long ordinal);
 
     // Drain every closed event, stop all lanes, and join their threads
     void drain_and_stop();
@@ -156,8 +165,8 @@ class OpticalTransportService
                              OpticalTransportBurst burst);
     static void
     close_event(std::shared_ptr<SharedState> const& state, long ordinal);
-    static PumpResult
-    pump(std::shared_ptr<SharedState> const& state, long ordinal);
+    static PumpResult pump(
+        std::shared_ptr<SharedState> const& state, long ordinal, bool try_lock);
     static bool
     is_complete(std::shared_ptr<SharedState> const& state, long ordinal);
     static void wait_until_complete(std::shared_ptr<SharedState> const& state,

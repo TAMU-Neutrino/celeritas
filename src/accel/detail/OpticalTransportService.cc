@@ -7,15 +7,19 @@
 #include "OpticalTransportService.hh"
 
 #include <algorithm>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <exception>
 #include <iterator>
+#include <limits>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
 
 #include "corecel/Assert.hh"
+#include "corecel/io/Logger.hh"
+#include "corecel/sys/Device.hh"
 
 namespace celeritas
 {
@@ -24,6 +28,9 @@ namespace detail
 //---------------------------------------------------------------------------//
 struct OpticalTransportService::SharedState
 {
+    using Clock = std::chrono::steady_clock;
+    using Duration = Clock::duration;
+
     enum class CommandType
     {
         burst,
@@ -40,6 +47,7 @@ struct OpticalTransportService::SharedState
     {
         LaneId lane;
         std::vector<optical::DetectorHit> hits;
+        Clock::time_point registered;
         bool ready{false};
         bool pumping{false};
         bool delivered{false};
@@ -51,16 +59,39 @@ struct OpticalTransportService::SharedState
         std::unordered_set<long> completed;
     };
 
+    struct LaneMetrics
+    {
+        size_type staged_bursts{0};
+        size_type staged_photons{0};
+        size_type idle_parks{0};
+        Duration idle_park_time{Duration::zero()};
+        size_type mailbox_hits{0};
+        size_type hit_mail_high_water{0};
+        size_type pump_count{0};
+        size_type pump_hits_total{0};
+        size_type pump_hits_max{0};
+        size_type registered_events{0};
+        size_type retired_events{0};
+        Duration retirement_time{Duration::zero()};
+        Duration retirement_max{Duration::zero()};
+        bool started{false};
+    };
+
     SharedState(Options const& opts, HitCallback callback)
         : options(opts)
-        , events(opts.num_lanes, opts.unresolved_limit)
+        , events(opts.num_lanes, opts.unresolved_limit, opts.base_ordinal)
         , ingress(opts.num_lanes)
         , delivery(opts.num_lanes)
+        , lane_metrics(opts.num_lanes)
         , hit_callback(std::move(callback))
     {
+        auto const num_lanes = static_cast<long>(delivery.size());
+        auto const base_lane = opts.base_ordinal % num_lanes;
         for (size_type i = 0; i < delivery.size(); ++i)
         {
-            delivery[i].next_ordinal = static_cast<long>(i);
+            auto const lane = static_cast<long>(i);
+            auto const offset = (lane - base_lane + num_lanes) % num_lanes;
+            delivery[i].next_ordinal = opts.base_ordinal + offset;
         }
     }
 
@@ -72,6 +103,7 @@ struct OpticalTransportService::SharedState
     OpticalEventTable events;
     std::vector<std::deque<Command>> ingress;
     std::vector<LaneDelivery> delivery;
+    std::vector<LaneMetrics> lane_metrics;
     std::unordered_map<long, EventResult> results;
     HitCallback hit_callback;
     std::exception_ptr terminal_error;
@@ -156,6 +188,11 @@ void cleanup_completed(S& state)
         {
             CELER_ASSERT(iter->second.hits.empty());
             CELER_ASSERT(!iter->second.pumping);
+            auto& metrics = state.lane_metrics[*iter->second.lane];
+            auto const elapsed = S::Clock::now() - iter->second.registered;
+            metrics.retirement_time += elapsed;
+            metrics.retirement_max = std::max(metrics.retirement_max, elapsed);
+            ++metrics.retired_events;
             iter = state.results.erase(iter);
         }
         else
@@ -209,6 +246,10 @@ void apply_progress(S& state,
                        << batch.event << " assigned to lane "
                        << result->second.lane);
         state.mailbox_hits += batch.hits.size();
+        auto& metrics = state.lane_metrics[*lane];
+        metrics.mailbox_hits += batch.hits.size();
+        metrics.hit_mail_high_water
+            = std::max(metrics.hit_mail_high_water, metrics.mailbox_hits);
         result->second.hits.insert(result->second.hits.end(),
                                    std::make_move_iterator(batch.hits.begin()),
                                    std::make_move_iterator(batch.hits.end()));
@@ -246,6 +287,35 @@ void advance_delivery(
 
     cleanup_completed(state);
     notify_state(state);
+}
+
+//---------------------------------------------------------------------------//
+template<class S>
+void log_lane_metrics(S const& state, OpticalTransportService::LaneId lane)
+{
+    auto const& metrics = state.lane_metrics[*lane];
+    double const idle_seconds
+        = std::chrono::duration<double>(metrics.idle_park_time).count();
+    double const retirement_total
+        = std::chrono::duration<double>(metrics.retirement_time).count();
+    double const retirement_mean = metrics.retired_events > 0
+                                       ? retirement_total
+                                             / metrics.retired_events
+                                       : 0;
+    double const retirement_max
+        = std::chrono::duration<double>(metrics.retirement_max).count();
+
+    CELER_LOG_LOCAL(info)
+        << "Optical streaming metrics: staged " << metrics.staged_bursts
+        << " bursts with " << metrics.staged_photons << " photons; idle "
+        << metrics.idle_parks << " parks for " << idle_seconds
+        << " s; hit mail high-water " << metrics.hit_mail_high_water
+        << " hits; pumped " << metrics.pump_hits_total << " hits over "
+        << metrics.pump_count << " calls (max " << metrics.pump_hits_max
+        << "); event retirement " << metrics.retired_events << " measured of "
+        << metrics.registered_events << " registered, " << retirement_total
+        << " s total (mean " << retirement_mean << " s, max " << retirement_max
+        << " s)";
 }
 
 //---------------------------------------------------------------------------//
@@ -426,6 +496,14 @@ OpticalTransportService::OpticalTransportService(
     CELER_VALIDATE(options.staged_bytes_limit > 0,
                    << "optical transport service requires a positive staged "
                       "byte limit");
+    CELER_VALIDATE(
+        options.base_ordinal >= 0,
+        << "invalid negative optical base ordinal " << options.base_ordinal);
+    CELER_VALIDATE(
+        options.base_ordinal <= std::numeric_limits<long>::max()
+                                    - static_cast<long>(options.num_lanes - 1),
+        << "optical base ordinal " << options.base_ordinal
+        << " is too large for " << options.num_lanes << " lanes");
     CELER_VALIDATE(make_lane, << "missing optical lane factory");
 
     state_ = std::make_shared<SharedState>(options, std::move(hit_callback));
@@ -481,7 +559,16 @@ auto OpticalTransportService::make_producer() -> ProducerToken
  */
 auto OpticalTransportService::pump(long ordinal) -> PumpResult
 {
-    return OpticalTransportService::pump(state_, ordinal);
+    return OpticalTransportService::pump(state_, ordinal, false);
+}
+
+//---------------------------------------------------------------------------//
+/*!
+ * Try to pump currently available hits without blocking on another pumper.
+ */
+auto OpticalTransportService::try_pump(long ordinal) -> PumpResult
+{
+    return OpticalTransportService::pump(state_, ordinal, true);
 }
 
 //---------------------------------------------------------------------------//
@@ -491,6 +578,15 @@ auto OpticalTransportService::pump(long ordinal) -> PumpResult
 bool OpticalTransportService::is_complete(long ordinal) const
 {
     return OpticalTransportService::is_complete(state_, ordinal);
+}
+
+//---------------------------------------------------------------------------//
+/*!
+ * Pump and wait until a registered, closed event is complete.
+ */
+void OpticalTransportService::wait_until_complete(long ordinal)
+{
+    OpticalTransportService::wait_until_complete(state_, ordinal);
 }
 
 //---------------------------------------------------------------------------//
@@ -551,7 +647,7 @@ void OpticalTransportService::drain_and_stop()
 
             for (long ordinal : ready)
             {
-                OpticalTransportService::pump(state_, ordinal);
+                OpticalTransportService::pump(state_, ordinal, false);
             }
         }
     }
@@ -564,6 +660,15 @@ void OpticalTransportService::drain_and_stop()
     if (failure)
     {
         std::rethrow_exception(failure);
+    }
+
+    for (size_type i = 0; i < lanes_.size(); ++i)
+    {
+        lanes_[i]->finalize();
+        if (state_->options.log_metrics)
+        {
+            log_lane_metrics(*state_, LaneId{i});
+        }
     }
 }
 
@@ -634,6 +739,7 @@ auto OpticalTransportService::register_event(
     LaneId const lane = state->events.register_event(ordinal);
     SharedState::EventResult result;
     result.lane = lane;
+    result.registered = SharedState::Clock::now();
     try
     {
         auto inserted = state->results.emplace(ordinal, std::move(result));
@@ -644,6 +750,7 @@ auto OpticalTransportService::register_event(
         set_terminal_error(*state, std::current_exception());
         throw;
     }
+    ++state->lane_metrics[*lane].registered_events;
     update_maxima(*state);
     notify_state(*state);
     return lane;
@@ -681,7 +788,9 @@ void OpticalTransportService::submit_burst(
         burst.event % static_cast<long>(state->options.num_lanes))};
     SharedState::Command command;
     command.type = SharedState::CommandType::burst;
-    command.burst = burst;
+    size_type const size_bytes = burst.size_bytes;
+    size_type const num_photons = burst.num_photons;
+    command.burst = std::move(burst);
     try
     {
         state->ingress[*lane].push_back(std::move(command));
@@ -691,7 +800,10 @@ void OpticalTransportService::submit_burst(
         set_terminal_error(*state, std::current_exception());
         throw;
     }
-    state->staged_bytes += burst.size_bytes;
+    state->staged_bytes += size_bytes;
+    auto& metrics = state->lane_metrics[*lane];
+    ++metrics.staged_bursts;
+    metrics.staged_photons += num_photons;
     update_maxima(*state);
     notify_state(*state);
     state->work_cv.notify_all();
@@ -723,10 +835,22 @@ void OpticalTransportService::close_event(
 }
 
 //---------------------------------------------------------------------------//
-auto OpticalTransportService::pump(std::shared_ptr<SharedState> const& state,
-                                   long ordinal) -> PumpResult
+auto OpticalTransportService::pump(
+    std::shared_ptr<SharedState> const& state, long ordinal, bool try_lock)
+    -> PumpResult
 {
-    std::lock_guard<std::mutex> pump_lock{state->pump_mutex};
+    std::unique_lock<std::mutex> pump_lock{state->pump_mutex, std::defer_lock};
+    if (try_lock)
+    {
+        if (!pump_lock.try_lock())
+        {
+            return {false, false, true};
+        }
+    }
+    else
+    {
+        pump_lock.lock();
+    }
 
     std::vector<optical::DetectorHit> hits;
     LaneId lane;
@@ -735,24 +859,30 @@ auto OpticalTransportService::pump(std::shared_ptr<SharedState> const& state,
         throw_if_failed(*state);
         if (state->events.is_complete(ordinal))
         {
-            return {false, true};
+            return {false, true, false};
         }
 
         auto result = state->results.find(ordinal);
         CELER_VALIDATE(result != state->results.end(),
                        << "optical event " << ordinal << " is not registered");
+        lane = result->second.lane;
+        auto& metrics = state->lane_metrics[*lane];
+        ++metrics.pump_count;
         if (result->second.delivered
             || (result->second.hits.empty() && !result->second.ready))
         {
-            return {false, false};
+            return {false, false, false};
         }
 
         CELER_ASSERT(!result->second.pumping);
         result->second.pumping = true;
-        lane = result->second.lane;
         hits.swap(result->second.hits);
         CELER_ASSERT(state->mailbox_hits >= hits.size());
         state->mailbox_hits -= hits.size();
+        CELER_ASSERT(metrics.mailbox_hits >= hits.size());
+        metrics.mailbox_hits -= hits.size();
+        metrics.pump_hits_total += hits.size();
+        metrics.pump_hits_max = std::max(metrics.pump_hits_max, hits.size());
         notify_state(*state);
     }
 
@@ -789,7 +919,7 @@ auto OpticalTransportService::pump(std::shared_ptr<SharedState> const& state,
     {
         notify_state(*state);
     }
-    return {true, state->events.is_complete(ordinal)};
+    return {true, state->events.is_complete(ordinal), false};
 }
 
 //---------------------------------------------------------------------------//
@@ -807,16 +937,44 @@ void OpticalTransportService::wait_until_complete(
 {
     while (true)
     {
-        if (OpticalTransportService::pump(state, ordinal).complete)
+        if (OpticalTransportService::pump(state, ordinal, false).complete)
         {
             return;
         }
 
+        std::vector<long> ready;
         std::unique_lock<std::mutex> lock{state->mutex};
         throw_if_failed(*state);
         if (state->events.is_complete(ordinal))
         {
             return;
+        }
+        auto const target = state->results.find(ordinal);
+        CELER_ASSERT(target != state->results.end());
+        if (!target->second.delivered && !target->second.pumping
+            && (target->second.ready || !target->second.hits.empty()))
+        {
+            // Progress may arrive after the pump attempt but before this
+            // lock. Retry instead of sleeping past that notification.
+            lock.unlock();
+            continue;
+        }
+        for (auto const& [ready_ordinal, result] : state->results)
+        {
+            if (ready_ordinal != ordinal && !result.delivered
+                && !result.pumping && (result.ready || !result.hits.empty()))
+            {
+                ready.push_back(ready_ordinal);
+            }
+        }
+        if (!ready.empty())
+        {
+            lock.unlock();
+            for (long ready_ordinal : ready)
+            {
+                OpticalTransportService::pump(state, ready_ordinal, false);
+            }
+            continue;
         }
         size_type const version = state->progress_version;
         state->state_cv.wait(lock, [&] {
@@ -857,6 +1015,9 @@ void OpticalTransportService::release_producer(
  */
 void OpticalTransportService::lane_loop(LaneId lane)
 {
+    // Make the process device current on this service-owned lane thread
+    activate_device_local();
+
     bool command_in_flight{false};
     try
     {
@@ -865,10 +1026,23 @@ void OpticalTransportService::lane_loop(LaneId lane)
             SharedState::Command command;
             {
                 std::unique_lock<std::mutex> lock{state_->mutex};
+                auto& metrics = state_->lane_metrics[*lane];
+                std::optional<SharedState::Clock::time_point> park_start;
+                if (metrics.started && state_->ingress[*lane].empty()
+                    && !state_->stop_requested)
+                {
+                    park_start = SharedState::Clock::now();
+                }
                 state_->work_cv.wait(lock, [&] {
                     return state_->stop_requested
                            || !state_->ingress[*lane].empty();
                 });
+                if (park_start)
+                {
+                    ++metrics.idle_parks;
+                    metrics.idle_park_time += SharedState::Clock::now()
+                                              - *park_start;
+                }
                 if (state_->stop_requested)
                 {
                     return;
@@ -877,6 +1051,7 @@ void OpticalTransportService::lane_loop(LaneId lane)
                 command = std::move(state_->ingress[*lane].front());
                 state_->ingress[*lane].pop_front();
                 ++state_->in_flight;
+                metrics.started = true;
                 command_in_flight = true;
                 if (command.type == SharedState::CommandType::burst)
                 {

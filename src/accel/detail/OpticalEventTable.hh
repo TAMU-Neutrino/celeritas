@@ -39,8 +39,9 @@ class OpticalEventTable
     //!@}
 
   public:
-    // Construct for a fixed number of lanes and admission bound
-    OpticalEventTable(size_type num_lanes, size_type unresolved_limit);
+    // Construct for fixed lanes, admission bound, and first run ordinal
+    OpticalEventTable(
+        size_type num_lanes, size_type unresolved_limit, long base_ordinal = 0);
 
     // Register an event before any submission and return its assigned lane
     LaneId register_event(long ordinal);

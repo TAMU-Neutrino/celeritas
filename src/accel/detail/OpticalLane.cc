@@ -499,6 +499,10 @@ auto OpticalLane::transport(OpticalTransportBurst const& burst)
                    << burst.num_photons << " photons but its distributions "
                    << "contain " << expected_photons);
 
+    ++absorb_drains_;
+    ++absorb_bursts_;
+    absorb_max_ = 1;
+
     OpticalTransportLaneProgress result;
     OpticalTransportHitBatch batch;
     batch.event = burst.event;

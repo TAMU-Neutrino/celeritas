@@ -47,6 +47,7 @@ list(APPEND SOURCES
   detail/IntegrationSingleton.cc
   detail/OpticalEventTable.cc
   detail/OpticalLane.cc
+  detail/OpticalSharedQueue.cc
   detail/OpticalTransportService.cc
   gen/CherenkovOffload.cc
   gen/ScintillationOffload.cc
