@@ -581,6 +581,8 @@ void OpticalLane::run(OpticalTransportLaneControl& control)
                       "the Geant4 backend uses per-thread geometry state");
 #endif
 
+    // Status level so the engagement marker survives default verbosity
+    CELER_LOG_LOCAL(status) << "Started streaming optical transport consumer";
     this->ConsumerLoop(&control);
 }
 
