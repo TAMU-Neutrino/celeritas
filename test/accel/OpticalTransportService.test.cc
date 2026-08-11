@@ -20,6 +20,8 @@
 #include <utility>
 #include <vector>
 
+#include "celeritas/optical/Types.hh"
+
 #include "celeritas_test.hh"
 
 #include "detail/FakeOpticalTransportLane.hh"
@@ -68,17 +70,21 @@ class HitCollector
     Service::HitCallback callback()
     {
         return [this](long ordinal,
-                      std::vector<detail::OpticalTransportHit> const& hits) {
+                      std::vector<optical::DetectorHit> const& hits) {
             std::lock_guard<std::mutex> lock{mutex_};
             ++callbacks_[ordinal];
             for (auto const& hit : hits)
             {
-                if (hit.event != ordinal)
+                auto const encoded_event = hit.primary.unchecked_get()
+                                           >> optical::event_shift;
+                if (encoded_event
+                    != static_cast<size_type>(
+                        ordinal % static_cast<long>(optical::event_ring)))
                 {
                     throw std::runtime_error{"hit delivered to wrong event"};
                 }
-                photons_[ordinal] += hit.num_photons;
-                total_photons_ += hit.num_photons;
+                ++photons_[ordinal];
+                ++total_photons_;
             }
         };
     }
@@ -227,11 +233,15 @@ TEST(OpticalTransportServiceTest, multi_burst_mid_event_pause)
     FakeLaneSetup fake{1};
     fake.configs[0].delay = 50us;
     HitCollector hits;
-    Service service{{1, 4, 8}, fake.factory(), hits.callback()};
+    Service service{{1, 4, sizeof(optical::GeneratorDistributionData)},
+                    fake.factory(),
+                    hits.callback()};
     {
         auto token = service.make_producer();
         token.register_event(0);
-        token.submit_burst(0, 2, 2);
+        std::vector<optical::GeneratorDistributionData> records(1);
+        records.front().num_photons = 2;
+        token.submit_burst(0, std::move(records), 2);
 
         Service::PumpResult first;
         EXPECT_TRUE(wait_until([&] {
@@ -488,13 +498,8 @@ TEST(OpticalTransportServiceTest, bounded_memory_soak)
     Service service{
         {2, batch_size, batch_size},
         fake.factory(),
-        [&hit_photons](long,
-                       std::vector<detail::OpticalTransportHit> const& hits) {
-            for (auto const& hit : hits)
-            {
-                hit_photons.fetch_add(hit.num_photons,
-                                      std::memory_order_relaxed);
-            }
+        [&hit_photons](long, std::vector<optical::DetectorHit> const& hits) {
+            hit_photons.fetch_add(hits.size(), std::memory_order_relaxed);
         }};
     {
         auto token = service.make_producer();

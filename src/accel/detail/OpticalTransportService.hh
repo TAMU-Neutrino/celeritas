@@ -41,7 +41,7 @@ class OpticalTransportService
     //! \name Type aliases
     using LaneId = OpticalEventTable::LaneId;
     using HitCallback
-        = std::function<void(long, std::vector<OpticalTransportHit> const&)>;
+        = std::function<void(long, std::vector<optical::DetectorHit> const&)>;
     using LaneFactory
         = std::function<std::unique_ptr<OpticalTransportLaneInterface>(LaneId)>;
     //!@}
@@ -95,6 +95,11 @@ class OpticalTransportService
         // Submit a bounded host-side burst
         void submit_burst(
             long ordinal, size_type num_photons, size_type size_bytes);
+
+        // Submit real optical generator records, charging their host bytes
+        void submit_burst(long ordinal,
+                          std::vector<optical::GeneratorDistributionData>,
+                          size_type num_photons);
 
         // Explicitly close an event against future submissions
         void close_event(long ordinal);

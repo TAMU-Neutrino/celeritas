@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: (Apache-2.0 OR MIT)
 //---------------------------------------------------------------------------//
 //! \file accel/detail/OpticalTransportLane.hh
+//! \sa OpticalTransportService.test.cc
 //---------------------------------------------------------------------------//
 #pragma once
 
@@ -10,6 +11,8 @@
 #include <vector>
 
 #include "corecel/Types.hh"
+#include "celeritas/optical/DetectorData.hh"
+#include "celeritas/optical/gen/GeneratorData.hh"
 
 namespace celeritas
 {
@@ -24,19 +27,17 @@ struct OpticalTransportBurst
     long event{-1};
     size_type num_photons{0};
     size_type size_bytes{0};
+    std::vector<optical::GeneratorDistributionData> records;
 };
 
 //---------------------------------------------------------------------------//
 /*!
- * Synthetic hit payload passed through the standalone service mailbox.
- *
- * The real detector hit type will replace this test-facing aggregate when the
- * service is wired to OpticalLane in a later piece.
+ * Hits from one event returned by an optical transport lane.
  */
-struct OpticalTransportHit
+struct OpticalTransportHitBatch
 {
     long event{-1};
-    size_type num_photons{0};
+    std::vector<optical::DetectorHit> hits;
 };
 
 //---------------------------------------------------------------------------//
@@ -46,7 +47,7 @@ struct OpticalTransportHit
 struct OpticalTransportLaneProgress
 {
     size_type total_generated{0};
-    std::vector<OpticalTransportHit> hits;
+    std::vector<OpticalTransportHitBatch> hit_batches;
     bool census_fresh{false};
     std::optional<long> min_live_ordinal;
 };
@@ -69,6 +70,9 @@ class OpticalTransportLaneInterface
 
     // Finish an event after all of its bursts have been submitted
     virtual OpticalTransportLaneProgress close_event(long ordinal) = 0;
+
+    // Emit lane-local finalization data after the owner thread has stopped
+    virtual void finalize() {}
 };
 
 //---------------------------------------------------------------------------//

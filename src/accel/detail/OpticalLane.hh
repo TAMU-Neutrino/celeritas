@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: (Apache-2.0 OR MIT)
 //---------------------------------------------------------------------------//
 //! \file accel/detail/OpticalLane.hh
+//! \sa OpticalLane.test.cc
 //---------------------------------------------------------------------------//
 #pragma once
 
@@ -17,6 +18,7 @@
 #include "celeritas/inp/Scoring.hh"
 #include "celeritas/optical/gen/GeneratorData.hh"
 
+#include "OpticalTransportLane.hh"
 #include "../LocalOffloadInterface.hh"
 
 namespace celeritas
@@ -34,7 +36,7 @@ namespace detail
 /*!
  * Own the transport state and consumer thread for one optical lane.
  */
-class OpticalLane
+class OpticalLane final : public OpticalTransportLaneInterface
 {
   public:
     //!@{
@@ -53,7 +55,7 @@ class OpticalLane
                 HitCallbackFunc user_hit_callback,
                 bool streaming);
 
-    ~OpticalLane();
+    ~OpticalLane() final;
 
     //! Whether lane-local state has been initialized
     explicit operator bool() const { return static_cast<bool>(state_); }
@@ -95,6 +97,18 @@ class OpticalLane
 
     // Log transport and streaming instrumentation at teardown
     void LogFinalization() const;
+
+    //// SHARED SERVICE ADAPTER //
+
+    // Transport one service burst synchronously on the owning lane thread
+    OpticalTransportLaneProgress
+    transport(OpticalTransportBurst const& burst) final;
+
+    // Report an empty census after all preceding lane work has drained
+    OpticalTransportLaneProgress close_event(long ordinal) final;
+
+    // Emit this lane's existing transport finalization line
+    void finalize() final;
 
   private:
     // Host-side streaming instrumentation (see .cc)

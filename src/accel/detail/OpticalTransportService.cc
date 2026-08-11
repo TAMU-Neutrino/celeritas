@@ -10,6 +10,7 @@
 #include <condition_variable>
 #include <deque>
 #include <exception>
+#include <iterator>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
@@ -38,7 +39,7 @@ struct OpticalTransportService::SharedState
     struct EventResult
     {
         LaneId lane;
-        std::vector<OpticalTransportHit> hits;
+        std::vector<optical::DetectorHit> hits;
         bool ready{false};
         bool pumping{false};
         bool delivered{false};
@@ -196,19 +197,21 @@ void apply_progress(S& state,
 {
     state.events.record_generation_progress(lane, progress.total_generated);
 
-    for (auto const& hit : progress.hits)
+    for (auto& batch : progress.hit_batches)
     {
-        auto result = state.results.find(hit.event);
+        auto result = state.results.find(batch.event);
         CELER_VALIDATE(result != state.results.end(),
                        << "lane " << lane
                        << " returned a hit for unregistered event "
-                       << hit.event);
+                       << batch.event);
         CELER_VALIDATE(result->second.lane == lane,
                        << "lane " << lane << " returned a hit for event "
-                       << hit.event << " assigned to lane "
+                       << batch.event << " assigned to lane "
                        << result->second.lane);
-        result->second.hits.push_back(hit);
-        ++state.mailbox_hits;
+        state.mailbox_hits += batch.hits.size();
+        result->second.hits.insert(result->second.hits.end(),
+                                   std::make_move_iterator(batch.hits.begin()),
+                                   std::make_move_iterator(batch.hits.end()));
     }
 
     // A report older than an already queued append is not a fresh census
@@ -324,6 +327,27 @@ void OpticalTransportService::ProducerToken::submit_burst(
     this->check_open(ordinal);
     OpticalTransportService::submit_burst(state_,
                                           {ordinal, num_photons, size_bytes});
+}
+
+//---------------------------------------------------------------------------//
+/*!
+ * Submit real optical generator records and charge their host storage.
+ */
+void OpticalTransportService::ProducerToken::submit_burst(
+    long ordinal,
+    std::vector<optical::GeneratorDistributionData> records,
+    size_type num_photons)
+{
+    OpticalTransportService::check_service(state_);
+    this->check_open(ordinal);
+
+    OpticalTransportBurst burst;
+    burst.event = ordinal;
+    burst.num_photons = num_photons;
+    burst.size_bytes = records.size()
+                       * sizeof(optical::GeneratorDistributionData);
+    burst.records = std::move(records);
+    OpticalTransportService::submit_burst(state_, std::move(burst));
 }
 
 //---------------------------------------------------------------------------//
@@ -704,7 +728,7 @@ auto OpticalTransportService::pump(std::shared_ptr<SharedState> const& state,
 {
     std::lock_guard<std::mutex> pump_lock{state->pump_mutex};
 
-    std::vector<OpticalTransportHit> hits;
+    std::vector<optical::DetectorHit> hits;
     LaneId lane;
     {
         std::lock_guard<std::mutex> lock{state->mutex};

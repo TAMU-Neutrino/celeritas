@@ -473,6 +473,92 @@ void OpticalLane::LogFinalization() const
 
 //---------------------------------------------------------------------------//
 /*!
+ * Transport one service burst synchronously on the owning lane thread.
+ *
+ * This adapter is separate from the existing facade's streaming methods. It
+ * installs a temporary hit sink so detector hits return through the service
+ * mailbox, then uses the established blocking insert-and-transport path.
+ */
+auto OpticalLane::transport(OpticalTransportBurst const& burst)
+    -> OpticalTransportLaneProgress
+{
+    CELER_EXPECT(*this);
+    CELER_VALIDATE(!stream_,
+                   << "optical lane cannot mix service and facade streaming");
+    CELER_VALIDATE(!burst.records.empty(),
+                   << "service burst for event " << burst.event
+                   << " has no optical distributions");
+
+    size_type expected_photons{0};
+    for (auto const& record : burst.records)
+    {
+        expected_photons += record.num_photons;
+    }
+    CELER_VALIDATE(expected_photons == burst.num_photons,
+                   << "service burst for event " << burst.event << " has "
+                   << burst.num_photons << " photons but its distributions "
+                   << "contain " << expected_photons);
+
+    OpticalTransportLaneProgress result;
+    OpticalTransportHitBatch batch;
+    batch.event = burst.event;
+    state_->hit_sink([&batch](Span<optical::DetectorHit const> hits) {
+        batch.hits.insert(batch.hits.end(), hits.begin(), hits.end());
+    });
+
+    try
+    {
+        generate_->insert(*state_, make_span(burst.records));
+        auto counters = state_->sync_get_counters();
+        counters.num_pending += burst.num_photons;
+        state_->sync_put_counters(counters);
+        (*transport_)(*state_);
+    }
+    catch (...)
+    {
+        state_->hit_sink(nullptr);
+        throw;
+    }
+    state_->hit_sink(nullptr);
+
+    result.total_generated
+        = generate_->counters(*state_->aux()).accum.num_generated;
+    if (!batch.hits.empty())
+    {
+        result.hit_batches.push_back(std::move(batch));
+    }
+    result.census_fresh = true;
+    return result;
+}
+
+//---------------------------------------------------------------------------//
+/*!
+ * Report completion progress for an explicitly closed service event.
+ */
+auto OpticalLane::close_event(long) -> OpticalTransportLaneProgress
+{
+    CELER_EXPECT(*this);
+    CELER_VALIDATE(!stream_,
+                   << "optical lane cannot mix service and facade streaming");
+
+    OpticalTransportLaneProgress result;
+    result.total_generated
+        = generate_->counters(*state_->aux()).accum.num_generated;
+    result.census_fresh = true;
+    return result;
+}
+
+//---------------------------------------------------------------------------//
+/*!
+ * Emit lane-local transport finalization data.
+ */
+void OpticalLane::finalize()
+{
+    this->LogFinalization();
+}
+
+//---------------------------------------------------------------------------//
+/*!
  * Consumer thread: a persistent transport loop fed by staged bursts.
  *
  * The loop absorbs staged bursts between step iterations, so the drain-out

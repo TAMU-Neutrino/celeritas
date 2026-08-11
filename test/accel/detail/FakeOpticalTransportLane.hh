@@ -13,7 +13,9 @@
 #include <optional>
 #include <stdexcept>
 #include <thread>
+#include <utility>
 
+#include "celeritas/optical/Types.hh"
 #include "accel/detail/OpticalTransportLane.hh"
 
 namespace celeritas
@@ -122,7 +124,17 @@ class FakeOpticalTransportLane final
         result.total_generated = total_generated_;
         if (burst.num_photons > 0)
         {
-            result.hits.push_back({burst.event, burst.num_photons});
+            detail::OpticalTransportHitBatch batch;
+            batch.event = burst.event;
+            batch.hits.resize(burst.num_photons);
+            auto const event_in_ring = static_cast<size_type>(
+                burst.event % static_cast<long>(optical::event_ring));
+            for (auto& hit : batch.hits)
+            {
+                hit.primary = id_cast<PrimaryId>(
+                    event_in_ring << optical::event_shift);
+            }
+            result.hit_batches.push_back(std::move(batch));
         }
         result.census_fresh = true;
         return result;
