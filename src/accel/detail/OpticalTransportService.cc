@@ -719,39 +719,24 @@ void OpticalTransportService::drain_and_stop()
     {
         while (true)
         {
-            bool pumped{false};
-            for (size_type i = 0; i < state_->options.num_lanes; ++i)
+            long pending_ordinal{-1};
             {
-                pumped = OpticalTransportService::pump(
-                             state_, std::nullopt, false)
-                             .pumped
-                         || pumped;
-            }
-
-            {
-                std::unique_lock<std::mutex> lock{state_->mutex};
+                std::lock_guard<std::mutex> lock{state_->mutex};
                 throw_if_failed(*state_);
                 if (state_->events.unresolved_count() == 0)
                 {
                     break;
                 }
-
-                bool pending_delivery = std::any_of(
-                    state_->delivery_pending.begin(),
-                    state_->delivery_pending.end(),
-                    [](auto const& pending) { return !pending.empty(); });
-                if (pumped || pending_delivery)
-                {
-                    continue;
-                }
-
-                size_type const version = state_->progress_version;
-                state_->state_cv.wait(lock, [&] {
-                    return state_->terminal_error
-                           || state_->events.unresolved_count() == 0
-                           || state_->progress_version != version;
-                });
+                CELER_ASSERT(!state_->results.empty());
+                pending_ordinal = state_->results.begin()->first;
             }
+
+            // A drain is a barrier, not a poll: keep blocking on one
+            // unresolved event's lane until callbacks make it complete.
+            // Lane failures, including the real lane's no-progress breaker,
+            // are fanned out through terminal_error by lane_loop.
+            OpticalTransportService::wait_until_complete(state_,
+                                                         pending_ordinal);
         }
     }
     catch (...)

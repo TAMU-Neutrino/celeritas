@@ -127,6 +127,7 @@ struct LocalOpticalGenOffload::SharedProducer
     std::optional<OpticalService::ProducerToken> token;
     std::deque<long> events;
     long delivered_through{-1};
+    bool barrier_cursor_pending{false};
     bool event_open{false};
 };
 
@@ -670,6 +671,16 @@ long LocalOpticalGenOffload::PumpSharedEvents(bool blocking)
     CELER_EXPECT(this->SharedQueueEnabled());
     auto& shared = *shared_state_;
 
+    if (!blocking)
+    {
+        std::lock_guard<std::mutex> lock{shared.mutex};
+        if (shared.barrier_cursor_pending)
+        {
+            shared.barrier_cursor_pending = false;
+            return shared.delivered_through;
+        }
+    }
+
     if (blocking)
     {
         std::deque<long> events;
@@ -693,6 +704,13 @@ long LocalOpticalGenOffload::PumpSharedEvents(bool blocking)
     {
         shared.delivered_through = shared.events.front();
         shared.events.pop_front();
+    }
+    if (blocking)
+    {
+        // Flush is void, so preserve its completed cursor for the barrier's
+        // following PumpStreaming call even if another producer holds the
+        // service pump gate at that instant.
+        shared.barrier_cursor_pending = true;
     }
     return shared.delivered_through;
 }

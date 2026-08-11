@@ -619,6 +619,54 @@ TEST(OpticalTransportServiceTest, drain_with_in_flight_work)
 }
 
 //---------------------------------------------------------------------------//
+TEST(OpticalTransportServiceTest, drain_delivers_after_last_hot_pump)
+{
+    constexpr long num_events = 100;
+    auto lane_zero_gate = std::make_shared<FakeOpticalLaneGate>();
+    auto lane_one_gate = std::make_shared<FakeOpticalLaneGate>();
+    FakeLaneSetup fake{2};
+    fake.configs[0].gate = lane_zero_gate;
+    fake.configs[0].gated_event = 0;
+    fake.configs[1].gate = lane_one_gate;
+    fake.configs[1].gated_event = 1;
+    HitCollector hits;
+    Service service{
+        {2, num_events, num_events}, fake.factory(), hits.callback()};
+    {
+        auto token = service.make_producer();
+        for (long ordinal = 0; ordinal < num_events; ++ordinal)
+        {
+            token.register_event(ordinal);
+            token.submit_burst(ordinal, 1, 1);
+            token.close_event(ordinal);
+        }
+
+        bool const lanes_blocked = lane_zero_gate->wait_until_entered(2s)
+                                   && lane_one_gate->wait_until_entered(2s);
+        if (!lanes_blocked)
+        {
+            lane_zero_gate->release();
+            lane_one_gate->release();
+            FAIL() << "fake lanes did not enter the deterministic gates";
+        }
+        EXPECT_FALSE(service.try_pump().pumped);
+        EXPECT_FALSE(service.try_pump().pumped);
+        EXPECT_EQ(0, hits.total_photons());
+    }
+
+    // Every result becomes ready after the final nonblocking attempt. The
+    // barrier must keep pumping until all callbacks have been delivered.
+    lane_zero_gate->release();
+    lane_one_gate->release();
+    service.drain_and_stop();
+
+    auto const stats = service.statistics();
+    EXPECT_EQ(num_events, hits.total_photons());
+    EXPECT_EQ(0, stats.unresolved_events);
+    EXPECT_EQ(num_events - 1, stats.completion_watermark);
+}
+
+//---------------------------------------------------------------------------//
 TEST(OpticalTransportServiceTest, lane_action_times_recorded_once)
 {
     FakeLaneSetup fake{2};
