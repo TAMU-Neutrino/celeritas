@@ -23,10 +23,59 @@ namespace celeritas
 namespace detail
 {
 class OpticalLane;
+class OpticalTransportService;
 }  // namespace detail
+
+namespace test
+{
+class LocalOpticalGenOffloadTestAccess;
+}  // namespace test
 
 struct SetupOptions;
 class SharedParams;
+
+//---------------------------------------------------------------------------//
+/*!
+ * Retain and control the process-wide optical transport service.
+ *
+ * Acquiring this handle keeps the shared service alive after producer facades
+ * release. This lets an application drain explicitly after all producers have
+ * stopped. If no handle is acquired, the existing last-facade auto-drain
+ * remains unchanged.
+ */
+class OpticalTransportServiceHandle final
+{
+  public:
+    OpticalTransportServiceHandle();
+    ~OpticalTransportServiceHandle();
+    OpticalTransportServiceHandle(OpticalTransportServiceHandle&&) noexcept;
+    OpticalTransportServiceHandle&
+    operator=(OpticalTransportServiceHandle&&) noexcept;
+
+    OpticalTransportServiceHandle(OpticalTransportServiceHandle const&)
+        = delete;
+    OpticalTransportServiceHandle&
+    operator=(OpticalTransportServiceHandle const&) = delete;
+
+    //! Whether this handle refers to a shared optical service
+    explicit operator bool() const;
+
+    // Try one service lane and deliver ready hits on the calling thread
+    bool TryPump();
+
+    // Query completion of any event registered with the process service
+    bool IsComplete(long ordinal) const;
+
+    // Drain and stop after all producer facades have released
+    void Drain();
+
+  private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+
+    explicit OpticalTransportServiceHandle(std::unique_ptr<Impl>);
+    friend class LocalOpticalGenOffload;
+};
 
 //---------------------------------------------------------------------------//
 /*!
@@ -113,6 +162,18 @@ class LocalOpticalGenOffload final : public LocalOffloadInterface
     // coordinates.
     long PumpStreaming();
 
+    // Query completion of an event owned by this shared-queue producer
+    bool IsSharedEventComplete(long ordinal) const;
+
+    // Report newly completed owned events without imposing ordinal order
+    std::vector<long> TakeCompletedSharedEvents();
+
+    // Wait through one owned event without draining or stopping the service
+    void WaitForSharedEventsThrough(long ordinal);
+
+    // Retain the process service for pumping and explicit post-worker drain
+    OpticalTransportServiceHandle GetSharedTransportService() const;
+
   private:
     // Lane-local transport state and streaming consumer
     std::shared_ptr<detail::OpticalLane> lane_;
@@ -158,6 +219,11 @@ class LocalOpticalGenOffload final : public LocalOffloadInterface
 
     // Release this producer and drain if it is the last facade
     void ReleaseSharedService();
+
+    // Construct a facade around an injected host service for unit testing
+    static LocalOpticalGenOffload MakeSharedQueueTestFacade(
+        std::shared_ptr<detail::OpticalTransportService>);
+    friend class test::LocalOpticalGenOffloadTestAccess;
 };
 
 //---------------------------------------------------------------------------//

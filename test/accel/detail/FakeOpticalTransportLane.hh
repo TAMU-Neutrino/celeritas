@@ -112,6 +112,7 @@ class FakeOpticalTransportLane final
         std::optional<long> failure_event;
         std::shared_ptr<FakeOpticalLaneGate> gate;
         std::optional<long> gated_event;
+        std::optional<long> gated_close_event;
     };
 
     FakeOpticalTransportLane(Config config,
@@ -160,6 +161,10 @@ class FakeOpticalTransportLane final
     {
         size_type const operation = this->record_call(
             detail::OpticalTransportLaneCommandType::close, ordinal);
+        if (config_.gate && config_.gated_close_event == ordinal)
+        {
+            config_.gate->wait();
+        }
         this->delay(ordinal, operation);
         if (config_.failure_event == ordinal)
         {
