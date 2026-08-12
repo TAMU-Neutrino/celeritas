@@ -13,6 +13,7 @@
 #include <limits>
 #include <mutex>
 #include <optional>
+#include <thread>
 #include <unordered_set>
 #include <utility>
 #include <G4EventManager.hh>
@@ -252,6 +253,7 @@ void OpticalTransportServiceHandle::Drain()
 //---------------------------------------------------------------------------//
 struct LocalOpticalGenOffload::SharedProducer
 {
+    std::thread::id const owner_thread{std::this_thread::get_id()};
     std::mutex mutex;
     std::shared_ptr<OpticalService> service;
     std::optional<OpticalService::ProducerToken> token;
@@ -271,6 +273,12 @@ struct LocalOpticalGenOffload::SharedProducer
 //---------------------------------------------------------------------------//
 namespace
 {
+template<class S>
+void expect_shared_owner(S const& shared)
+{
+    CELER_EXPECT(shared.owner_thread == std::this_thread::get_id());
+}
+
 template<class S>
 bool shared_event_complete(S& shared, long ordinal)
 {
@@ -796,6 +804,7 @@ bool LocalOpticalGenOffload::IsSharedEventComplete(long ordinal) const
 {
     CELER_EXPECT(this->SharedQueueEnabled());
     auto& shared = *shared_state_;
+    expect_shared_owner(shared);
     std::lock_guard<std::mutex> lock{shared.mutex};
     CELER_VALIDATE(!shared.wait_in_progress,
                    << "cannot query producer event " << ordinal
@@ -812,6 +821,7 @@ auto LocalOpticalGenOffload::TakeCompletedSharedEvents() -> std::vector<long>
 {
     CELER_EXPECT(this->SharedQueueEnabled());
     auto& shared = *shared_state_;
+    expect_shared_owner(shared);
     std::vector<long> result;
     std::lock_guard<std::mutex> lock{shared.mutex};
     start_completion_tracking(shared);
@@ -841,6 +851,7 @@ void LocalOpticalGenOffload::WaitForSharedEventsThrough(long ordinal)
 {
     CELER_EXPECT(this->SharedQueueEnabled());
     auto& shared = *shared_state_;
+    expect_shared_owner(shared);
     std::vector<long> barrier_events;
     {
         std::lock_guard<std::mutex> lock{shared.mutex};

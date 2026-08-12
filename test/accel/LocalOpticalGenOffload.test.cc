@@ -156,33 +156,42 @@ TEST(LocalOpticalGenOffloadTest, wait_releases_facade_mutex)
     fake.configs[0].gated_close_event = 0;
     auto service
         = std::make_shared<Service>(Service::Options{1, 2, 2}, fake.factory());
-    auto facade = LocalOpticalGenOffloadTestAccess::make_facade(service);
-
-    facade.InitializeEvent(0);
-    facade.StageStreaming();
-    ASSERT_TRUE(gate->wait_until_entered(2s));
-
+    std::promise<LocalOpticalGenOffload*> facade_ready;
+    std::promise<bool> lane_entered;
     std::promise<void> wait_started;
+    std::promise<void> allow_finalize;
+    auto facade_future = facade_ready.get_future();
+    auto lane_future = lane_entered.get_future();
     auto started = wait_started.get_future();
-    auto waiter = std::async(std::launch::async, [&] {
+    auto finalize = allow_finalize.get_future();
+    auto owner = std::async(std::launch::async, [&] {
+        auto facade = LocalOpticalGenOffloadTestAccess::make_facade(service);
+        facade.InitializeEvent(0);
+        facade.StageStreaming();
+        lane_entered.set_value(gate->wait_until_entered(2s));
+        facade_ready.set_value(&facade);
         wait_started.set_value();
         facade.WaitForSharedEventsThrough(0);
+        finalize.wait();
+        facade.Finalize();
     });
+    auto* facade = facade_future.get();
+    bool const lane_blocked = lane_future.get();
     started.wait();
     std::this_thread::sleep_for(50ms);
 
-    auto reporter = std::async(std::launch::async, [&] {
-        return facade.TakeCompletedSharedEvents();
-    });
-    bool const facade_mutex_released = reporter.wait_for(100ms)
+    auto module_pump = std::async(std::launch::async,
+                                  [&] { return facade->PumpStreaming(); });
+    bool const facade_mutex_released = module_pump.wait_for(100ms)
                                        == std::future_status::ready;
 
     // Always release the lane so failures cannot strand either future.
     gate->release();
+    EXPECT_TRUE(lane_blocked);
     EXPECT_TRUE(facade_mutex_released);
-    waiter.get();
-    reporter.get();
-    facade.Finalize();
+    module_pump.get();
+    allow_finalize.set_value();
+    owner.get();
 }
 
 //---------------------------------------------------------------------------//

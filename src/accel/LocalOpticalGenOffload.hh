@@ -162,6 +162,9 @@ class LocalOpticalGenOffload final : public LocalOffloadInterface
     // coordinates.
     long PumpStreaming();
 
+    // The following completion APIs are owning-producer-thread only: the
+    // service handle is the module-thread interface.
+
     // Query completion of an event owned by this shared-queue producer
     bool IsSharedEventComplete(long ordinal) const;
 
