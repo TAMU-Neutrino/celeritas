@@ -257,11 +257,13 @@ struct LocalOpticalGenOffload::SharedProducer
     std::optional<OpticalService::ProducerToken> token;
     // Producer-local ordered prefix for the legacy PumpStreaming cursor
     std::deque<long> events;
-    // Populated only when the additive per-event APIs are called
-    std::unordered_set<long> reported_events;
+    // Independent ledger, populated only when per-event reporting is used
+    std::deque<long> completion_reports;
     std::unordered_set<long> waited_events;
-    std::deque<long> pending_wait_reports;
     long delivered_through{-1};
+    bool completion_tracking{false};
+    bool untracked_prefix_consumed{false};
+    bool wait_in_progress{false};
     bool barrier_cursor_pending{false};
     bool event_open{false};
 };
@@ -276,15 +278,28 @@ bool shared_event_complete(S& shared, long ordinal)
 }
 
 template<class S>
+void start_completion_tracking(S& shared)
+{
+    CELER_VALIDATE(!shared.untracked_prefix_consumed,
+                   << "cannot start per-event optical completion reporting "
+                      "after PumpStreaming consumed an unreported prefix");
+    if (!shared.completion_tracking)
+    {
+        shared.completion_reports = shared.events;
+        shared.completion_tracking = true;
+    }
+}
+
+template<class S>
 void advance_shared_prefix(S& shared)
 {
     while (!shared.events.empty()
            && shared_event_complete(shared, shared.events.front()))
     {
         shared.delivered_through = shared.events.front();
-        if (!shared.reported_events.empty())
+        if (!shared.completion_tracking)
         {
-            shared.reported_events.erase(shared.events.front());
+            shared.untracked_prefix_consumed = true;
         }
         shared.events.pop_front();
     }
@@ -502,6 +517,10 @@ void LocalOpticalGenOffload::InitializeEvent(int id)
         {
             std::lock_guard<std::mutex> lock{shared.mutex};
             shared.events.push_back(id);
+            if (shared.completion_tracking)
+            {
+                shared.completion_reports.push_back(id);
+            }
             shared.event_open = true;
         }
         event_ordinal_ = id;
@@ -778,6 +797,9 @@ bool LocalOpticalGenOffload::IsSharedEventComplete(long ordinal) const
     CELER_EXPECT(this->SharedQueueEnabled());
     auto& shared = *shared_state_;
     std::lock_guard<std::mutex> lock{shared.mutex};
+    CELER_VALIDATE(!shared.wait_in_progress,
+                   << "cannot query producer event " << ordinal
+                   << " while its completion barrier is active");
     return shared.waited_events.count(ordinal) != 0
            || shared.token->is_complete(ordinal);
 }
@@ -792,20 +814,22 @@ auto LocalOpticalGenOffload::TakeCompletedSharedEvents() -> std::vector<long>
     auto& shared = *shared_state_;
     std::vector<long> result;
     std::lock_guard<std::mutex> lock{shared.mutex};
-    result.insert(result.end(),
-                  shared.pending_wait_reports.begin(),
-                  shared.pending_wait_reports.end());
-    shared.pending_wait_reports.clear();
-    for (long ordinal : shared.events)
+    start_completion_tracking(shared);
+    auto iter = shared.completion_reports.begin();
+    while (iter != shared.completion_reports.end())
     {
-        if (shared.reported_events.count(ordinal) == 0
-            && (shared.waited_events.count(ordinal) != 0
-                || shared.token->is_complete(ordinal)))
+        if (shared.waited_events.count(*iter) != 0
+            || shared_event_complete(shared, *iter))
         {
-            result.push_back(ordinal);
-            shared.reported_events.insert(ordinal);
+            result.push_back(*iter);
+            iter = shared.completion_reports.erase(iter);
+        }
+        else
+        {
+            ++iter;
         }
     }
+    advance_shared_prefix(shared);
     return result;
 }
 
@@ -817,43 +841,62 @@ void LocalOpticalGenOffload::WaitForSharedEventsThrough(long ordinal)
 {
     CELER_EXPECT(this->SharedQueueEnabled());
     auto& shared = *shared_state_;
-    std::lock_guard<std::mutex> lock{shared.mutex};
-    if (shared.waited_events.count(ordinal) != 0)
-    {
-        return;
-    }
-    // Validate ownership before waiting; the token also verifies closure.
-    shared.token->is_complete(ordinal);
-
-    auto const target
-        = std::find(shared.events.begin(), shared.events.end(), ordinal);
     std::vector<long> barrier_events;
-    if (target == shared.events.end())
     {
-        // A legacy pump already removed this completed event from its prefix.
-        barrier_events.push_back(ordinal);
-    }
-    else
-    {
-        barrier_events.assign(shared.events.begin(), std::next(target));
+        std::lock_guard<std::mutex> lock{shared.mutex};
+        start_completion_tracking(shared);
+        CELER_VALIDATE(!shared.wait_in_progress,
+                       << "another producer completion barrier is active");
+        if (shared.waited_events.count(ordinal) != 0)
+        {
+            return;
+        }
+        // Validate ownership before waiting; the token also verifies closure.
+        shared.token->is_complete(ordinal);
+
+        auto const target
+            = std::find(shared.events.begin(), shared.events.end(), ordinal);
+        if (target == shared.events.end())
+        {
+            // A barrier already removed this completed event from its prefix.
+            barrier_events.push_back(ordinal);
+        }
+        else
+        {
+            barrier_events.assign(shared.events.begin(), std::next(target));
+        }
+        shared.wait_in_progress = true;
     }
 
-    for (long current : barrier_events)
+    try
     {
-        if (shared.waited_events.count(current) != 0)
+        for (long current : barrier_events)
         {
-            continue;
-        }
-        shared.token->wait_until_complete(current);
-        shared.waited_events.insert(current);
-        if (shared.reported_events.erase(current) == 0)
-        {
-            shared.pending_wait_reports.push_back(current);
+            {
+                std::lock_guard<std::mutex> lock{shared.mutex};
+                if (shared.waited_events.count(current) != 0)
+                {
+                    continue;
+                }
+            }
+            shared.token->wait_until_complete(current);
+            std::lock_guard<std::mutex> lock{shared.mutex};
+            shared.waited_events.insert(current);
         }
     }
-    advance_shared_prefix(shared);
-    // Preserve the established barrier-followup PumpStreaming handoff.
-    shared.barrier_cursor_pending = true;
+    catch (...)
+    {
+        std::lock_guard<std::mutex> lock{shared.mutex};
+        shared.wait_in_progress = false;
+        throw;
+    }
+    {
+        std::lock_guard<std::mutex> lock{shared.mutex};
+        shared.wait_in_progress = false;
+        advance_shared_prefix(shared);
+        // Preserve the established barrier-followup PumpStreaming handoff.
+        shared.barrier_cursor_pending = true;
+    }
 }
 
 //---------------------------------------------------------------------------//

@@ -165,10 +165,12 @@ class LocalOpticalGenOffload final : public LocalOffloadInterface
     // Query completion of an event owned by this shared-queue producer
     bool IsSharedEventComplete(long ordinal) const;
 
-    // Report newly completed owned events without imposing ordinal order
+    // Report newly completed owned events without imposing ordinal order.
+    // Starting this after PumpStreaming consumed a prefix is an error.
     std::vector<long> TakeCompletedSharedEvents();
 
-    // Wait through one owned event without draining or stopping the service
+    // Wait through one owned event without draining or stopping the service.
+    // This starts per-event reporting and cannot follow a consumed prefix.
     void WaitForSharedEventsThrough(long ordinal);
 
     // Retain the process service for pumping and explicit post-worker drain

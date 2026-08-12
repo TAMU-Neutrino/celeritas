@@ -7,6 +7,7 @@
 #include "accel/LocalOpticalGenOffload.hh"
 
 #include <chrono>
+#include <future>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -128,6 +129,60 @@ TEST(LocalOpticalGenOffloadTest, reports_out_of_order_completion)
 
     facade.Finalize();
     control.Drain();
+}
+
+//---------------------------------------------------------------------------//
+TEST(LocalOpticalGenOffloadTest, rejects_reporting_after_prefix_consumption)
+{
+    FakeLaneSetup fake{1};
+    auto service
+        = std::make_shared<Service>(Service::Options{1, 2, 2}, fake.factory());
+    auto facade = LocalOpticalGenOffloadTestAccess::make_facade(service);
+
+    facade.InitializeEvent(0);
+    facade.StageStreaming();
+    ASSERT_TRUE(wait_until([&] { return facade.PumpStreaming() == 0; }));
+
+    EXPECT_THROW(facade.TakeCompletedSharedEvents(), RuntimeError);
+    facade.Finalize();
+}
+
+//---------------------------------------------------------------------------//
+TEST(LocalOpticalGenOffloadTest, wait_releases_facade_mutex)
+{
+    auto gate = std::make_shared<FakeOpticalLaneGate>();
+    FakeLaneSetup fake{1};
+    fake.configs[0].gate = gate;
+    fake.configs[0].gated_close_event = 0;
+    auto service
+        = std::make_shared<Service>(Service::Options{1, 2, 2}, fake.factory());
+    auto facade = LocalOpticalGenOffloadTestAccess::make_facade(service);
+
+    facade.InitializeEvent(0);
+    facade.StageStreaming();
+    ASSERT_TRUE(gate->wait_until_entered(2s));
+
+    std::promise<void> wait_started;
+    auto started = wait_started.get_future();
+    auto waiter = std::async(std::launch::async, [&] {
+        wait_started.set_value();
+        facade.WaitForSharedEventsThrough(0);
+    });
+    started.wait();
+    std::this_thread::sleep_for(50ms);
+
+    auto reporter = std::async(std::launch::async, [&] {
+        return facade.TakeCompletedSharedEvents();
+    });
+    bool const facade_mutex_released = reporter.wait_for(100ms)
+                                       == std::future_status::ready;
+
+    // Always release the lane so failures cannot strand either future.
+    gate->release();
+    EXPECT_TRUE(facade_mutex_released);
+    waiter.get();
+    reporter.get();
+    facade.Finalize();
 }
 
 //---------------------------------------------------------------------------//
