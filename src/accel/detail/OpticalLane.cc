@@ -7,9 +7,11 @@
 #include "OpticalLane.hh"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <unordered_map>
 
@@ -61,6 +63,19 @@ struct OpticalLane::Instrumentation
         double retirement_seconds_total{0};
         double retirement_seconds_mean{0};
         double retirement_seconds_max{0};
+        size_type turns{0};
+        size_type pending_zero_turns{0};
+        size_type pending_full_turns{0};
+        std::array<size_type, 5> pending_hist{};
+        std::array<size_type, 5> generated_hist{};
+        std::array<size_type, 5> alive_hist{};
+        size_type generated_sum{0};
+        size_type generated_max{0};
+        size_type alive_sum{0};
+        size_type alive_max{0};
+        double generate_seconds{0};
+        double transport_seconds{0};
+        double wait_seconds{0};
     };
 
     void register_event(long ordinal)
@@ -94,6 +109,39 @@ struct OpticalLane::Instrumentation
     {
         ++idle_parks;
         idle_park_time += elapsed;
+    }
+
+    void record_wait(Duration elapsed)
+    {
+        wait_time += elapsed;
+    }
+
+    void begin_turn(CoreStateCounters const& counters)
+    {
+        ++turns;
+        pending_zero_turns += counters.num_pending == 0;
+        pending_full_turns += counters.num_pending >= counters.num_vacancies;
+        ++pending_hist[bucket(counters.num_pending)];
+        ++alive_hist[bucket(counters.num_alive)];
+        alive_sum += counters.num_alive;
+        alive_max = std::max(alive_max, counters.num_alive);
+    }
+
+    void record_generated(size_type count)
+    {
+        ++generated_hist[bucket(count)];
+        generated_sum += count;
+        generated_max = std::max(generated_max, count);
+    }
+
+    void record_generate(Duration elapsed)
+    {
+        generate_time += elapsed;
+    }
+
+    void record_transport(Duration elapsed)
+    {
+        transport_time += elapsed;
     }
 
     void record_pump(size_type hits)
@@ -139,7 +187,36 @@ struct OpticalLane::Instrumentation
                                              : 0;
         result.retirement_seconds_max
             = std::chrono::duration<double>(retirement_max).count();
+        result.turns = turns;
+        result.pending_zero_turns = pending_zero_turns;
+        result.pending_full_turns = pending_full_turns;
+        result.pending_hist = pending_hist;
+        result.generated_hist = generated_hist;
+        result.alive_hist = alive_hist;
+        result.generated_sum = generated_sum;
+        result.generated_max = generated_max;
+        result.alive_sum = alive_sum;
+        result.alive_max = alive_max;
+        result.generate_seconds
+            = std::chrono::duration<double>(generate_time).count();
+        result.transport_seconds
+            = std::chrono::duration<double>(transport_time).count();
+        result.wait_seconds
+            = std::chrono::duration<double>(wait_time).count();
         return result;
+    }
+
+    static size_type bucket(size_type value)
+    {
+        if (value == 0)
+            return 0;
+        if (value < 100)
+            return 1;
+        if (value < 1000)
+            return 2;
+        if (value < 8192)
+            return 3;
+        return 4;
     }
 
     std::deque<EventRegistration> pending_events;
@@ -156,6 +233,19 @@ struct OpticalLane::Instrumentation
     size_type retired_events{0};
     Duration retirement_time{Duration::zero()};
     Duration retirement_max{Duration::zero()};
+    size_type turns{0};
+    size_type pending_zero_turns{0};
+    size_type pending_full_turns{0};
+    std::array<size_type, 5> pending_hist{};
+    std::array<size_type, 5> generated_hist{};
+    std::array<size_type, 5> alive_hist{};
+    size_type generated_sum{0};
+    size_type generated_max{0};
+    size_type alive_sum{0};
+    size_type alive_max{0};
+    Duration generate_time{Duration::zero()};
+    Duration transport_time{Duration::zero()};
+    Duration wait_time{Duration::zero()};
 };
 
 //---------------------------------------------------------------------------//
@@ -242,10 +332,8 @@ OpticalLane::OpticalLane(
             *optical_params.aux_reg(), memspace, stream_id, num_track_slots);
     }
 
-    if (streaming)
-    {
-        metrics_ = std::make_shared<Instrumentation>();
-    }
+    // Keep the same host-only counters for facade and service-owned lanes.
+    metrics_ = std::make_shared<Instrumentation>();
 }
 
 OpticalLane::~OpticalLane() = default;
@@ -460,6 +548,27 @@ void OpticalLane::LogFinalization() const
             << metrics.retirement_seconds_total << " s total (mean "
             << metrics.retirement_seconds_mean << " s, max "
             << metrics.retirement_seconds_max << " s)";
+
+        auto print_hist = [](std::array<size_type, 5> const& hist) {
+            return std::string{"["} + std::to_string(hist[0]) + ","
+                   + std::to_string(hist[1]) + "," + std::to_string(hist[2])
+                   + "," + std::to_string(hist[3]) + ","
+                   + std::to_string(hist[4]) + "]";
+        };
+        CELER_LOG_LOCAL(info)
+            << "Optical loop metrics: turns " << metrics.turns
+            << "; pending zero " << metrics.pending_zero_turns
+            << ", vacancy-limited " << metrics.pending_full_turns
+            << "; pending histogram " << print_hist(metrics.pending_hist)
+            << "; generated histogram " << print_hist(metrics.generated_hist)
+            << " (sum " << metrics.generated_sum << ", max "
+            << metrics.generated_max << ")"
+            << "; alive histogram " << print_hist(metrics.alive_hist)
+            << " (sum " << metrics.alive_sum << ", max " << metrics.alive_max
+            << ")"
+            << "; wait " << metrics.wait_seconds << " s; generate "
+            << metrics.generate_seconds << " s; transport "
+            << metrics.transport_seconds << " s";
     }
 
     if (!gen.counters.empty())
@@ -748,7 +857,10 @@ void OpticalLane::ConsumerLoop(OpticalTransportLaneControl* control)
                     size_type const encoded_event = static_cast<size_type>(
                         burst.event % static_cast<long>(optical::event_ring));
                     service_event_ordinals[encoded_event] = burst.event;
+                    auto const generate_start = Instrumentation::Clock::now();
                     generate_->append(state, make_span(burst.records));
+                    metrics_->record_generate(
+                        Instrumentation::Clock::now() - generate_start);
                     admitted_sequence = std::max(admitted_sequence,
                                                  command.admission_sequence);
                     ++absorbed_bursts;
@@ -791,7 +903,10 @@ void OpticalLane::ConsumerLoop(OpticalTransportLaneControl* control)
                     for (auto& b : bursts)
                     {
                         metrics_->observe_events(b.registrations);
+                        auto const generate_start = Instrumentation::Clock::now();
                         generate_->append(state, make_span(b.records));
+                        metrics_->record_generate(
+                            Instrumentation::Clock::now() - generate_start);
                         absorbed_event = b.event;
                         // Cumulative photon total at the end of this event,
                         // against which the generator's progress says when
@@ -804,6 +919,8 @@ void OpticalLane::ConsumerLoop(OpticalTransportLaneControl* control)
                 }
             }
 
+            auto const generated_before = counters.num_generated;
+            metrics_->begin_turn(counters);
             if (has_transportable_work(counters))
             {
                 long const census_origin
@@ -812,8 +929,15 @@ void OpticalLane::ConsumerLoop(OpticalTransportLaneControl* control)
                 CELER_VALIDATE(census_origin >= 0,
                                << "invalid negative optical census base "
                                << census_origin);
+                auto const transport_start = Instrumentation::Clock::now();
                 counters = transport_->step_once(
                     state, iter++, static_cast<size_type>(census_origin));
+                metrics_->record_transport(
+                    Instrumentation::Clock::now() - transport_start);
+                metrics_->record_generated(
+                    counters.num_generated >= generated_before
+                        ? counters.num_generated - generated_before
+                        : 0);
 
                 // How far the generator has got: everything up to here has
                 // been turned into tracks, so an event below it can only
@@ -925,12 +1049,16 @@ void OpticalLane::ConsumerLoop(OpticalTransportLaneControl* control)
                 continue;
             }
 
+            metrics_->record_generated(0);
+
             // Nothing in flight: publish the drain cursor and park
             if (control)
             {
                 ++state.accum().flushes;
                 publish_service_progress(true, std::nullopt);
+                auto const wait_start = Instrumentation::Clock::now();
                 auto const status = control->receive(service_commands, true);
+                metrics_->record_wait(Instrumentation::Clock::now() - wait_start);
                 if (status == OpticalTransportLaneControl::ReceiveStatus::stop)
                 {
                     break;
@@ -957,8 +1085,9 @@ void OpticalLane::ConsumerLoop(OpticalTransportLaneControl* control)
                 auto const park_start = Instrumentation::Clock::now();
                 sx->cv.wait(lock,
                             [sx] { return !sx->staged.empty() || sx->stop; });
-                metrics_->record_park(
-                    Instrumentation::Clock::now() - park_start);
+                auto const parked = Instrumentation::Clock::now() - park_start;
+                metrics_->record_park(parked);
+                metrics_->record_wait(parked);
                 sx->idle = false;
             }
         }

@@ -818,6 +818,14 @@ void OpticalTransportService::drain_and_stop()
             log_lane_metrics(*state_, LaneId{i});
         }
     }
+
+    auto const stats = this->statistics();
+    CELER_LOG_LOCAL(info)
+        << "Optical transport service metrics: event admission waits "
+        << stats.event_admission_waits << "; staged-bytes waits "
+        << stats.staged_bytes_waits << "; staged bytes " << stats.staged_bytes
+        << " (max " << stats.max_staged_bytes << ", limit "
+        << state_->options.staged_bytes_limit << ")";
 }
 
 //---------------------------------------------------------------------------//
